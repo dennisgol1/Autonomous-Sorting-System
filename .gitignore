@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+
+# Debug artefacts (frames, raw VLM responses, parsed scenes)
+# Keep the folder, ignore its contents
+debug/*
+!debug/.gitkeep
