@@ -6,8 +6,8 @@ from pathlib import Path
 import cv2
 import ollama
 
-# Debug output directory — one level above src/
-DEBUG_DIR = Path(__file__).parent.parent / "debug"
+# Debug output directory — project root/debug/
+DEBUG_DIR = Path(__file__).parent.parent.parent / "debug"
 
 # Color-to-class mapping enforced via the system prompt.
 # Laptop POC: place physically colored objects in front of the webcam.
