@@ -68,20 +68,26 @@ Max retries: **3** (configured via `MAX_RETRIES` in `main.py`)
 ```
 AUTONOMOUS-SORTING-SYSTEM/
 ├── README.md                     # Architecture document (assignment deliverable 1)
-├── HANDOFF.md                    # This file
 ├── requirements.txt              # ollama, opencv-python
 ├── .gitignore
+├── docs/
+│   └── HANDOFF.md                # This file — AI context for new machine/session
 ├── debug/                        # Auto-created. Populated when USE_VLM=True.
+│   ├── README.md                     # Explains debug file format
 │   ├── YYYYMMDD_HHMMSS_frame.jpg     # Captured webcam/sim frame
 │   ├── YYYYMMDD_HHMMSS_vlm_raw.txt   # Exact VLM response (pre-parse)
 │   └── YYYYMMDD_HHMMSS_scene.json    # Validated scene dict
 └── src/
+    ├── README.md                 # Pipeline diagram + mode flags reference
     ├── main.py                   # Orchestrator — 3 pipeline modes via flags
     ├── execution/
+    │   ├── README.md             # StatusCode table, mock vs real robot
     │   └── hardware_api.py       # MockFrankaRobot + StatusCode enum
     ├── perception/
+    │   ├── README.md             # Webcam flow, output schema, Isaac Sim swap
     │   └── vlm_client.py         # PerceptionClient — webcam + Qwen VL
     └── reasoning/
+        ├── README.md             # LLM flow, think-tag stripping, output schema
         └── llm_client.py         # ReasoningClient — DeepSeek-R1 + JSON parser
 ```
 
@@ -198,6 +204,7 @@ from execution.hardware_api import FrankaRobot as Robot
 - **Coordinate space:** VLM outputs normalized image coords [-0.5, 0.5]. Isaac Sim uses meters in robot frame. A coordinate transform will be needed at the Isaac Sim integration stage.
 - **Model name note:** `deepseek-r1:8b` now resolves to the Qwen3-based R1-0528 distill. If exact reproducibility matters, pin to `deepseek-r1:8b-0528-qwen3-q4_K_M`.
 - **VLM model name:** The project targets Qwen 3 VL (architecture doc). The current closest available on Ollama is `qwen2.5vl:7b`. Update the model name in `vlm_client.py` when Qwen 3 VL becomes available.
+- **Laptop RAM:** `qwen2.5vl:7b` requires ~5.8 GB free RAM. The dev laptop cannot run it. Full pipeline (Mode 3) must be tested on the Isaac Sim machine. Mode 2 (LLM-only) works on the laptop.
 
 ---
 
@@ -210,5 +217,17 @@ from execution.hardware_api import FrankaRobot as Robot
 | 1  | `perception/vlm_client.py` | Done | Qwen VL wrapper, webcam capture, debug output |
 | —  | `execution/hardware_api.py` | Done | MockFrankaRobot with realistic failure rates |
 | —  | Integration | Done | All layers wired in main.py with 3-mode flags |
+| —  | Documentation | Done | README.md + per-folder READMEs + HANDOFF.md in docs/ |
+| —  | Live test (laptop) | Blocked | qwen2.5vl:7b OOMs on laptop — test on Isaac Sim machine |
 | —  | Isaac Sim | Pending | Swap 2 methods (see Section 7) |
 | —  | Videos | Pending | Record after Isaac Sim integration |
+
+---
+
+## 10. What to Do First on the Linux Machine
+
+1. Follow Section 5 (setup + model pull)
+2. Run Mode 2 first to verify DeepSeek-R1 reasoning works: set `USE_VLM=False, USE_LLM=True` in `src/main.py`
+3. Run Mode 3 (full pipeline) with 3 colored objects in front of camera: set `USE_VLM=True, USE_LLM=True`
+4. Check `debug/` folder — verify `_vlm_raw.txt` and `_scene.json` look correct
+5. Proceed to Isaac Sim integration (Section 7)
