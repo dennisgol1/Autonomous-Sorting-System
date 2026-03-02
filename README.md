@@ -1,15 +1,15 @@
 # Autonomous Sorting System: Project Architecture
 
 ## 1. System Overview
-[cite_start]The system utilizes a modular "Perceive-Reason-Act" pipeline to bridge high-level perception with low-level hardware execution[cite: 6].
+The system utilizes a modular "Perceive-Reason-Act" pipeline to bridge high-level perception with low-level hardware execution.
 
 ## 2. Component Breakdown
-* [cite_start]**Perception Layer (Qwen 3 VL):** Processes the RGB-D feed from the simulation[cite: 7]. [cite_start]We selected Qwen 3 VL for its state-of-the-art visual grounding, allowing for highly accurate extraction of object classes and estimation of 3D coordinates[cite: 7].
-* [cite_start]**Reasoning Layer (DeepSeek-R1 Distilled):** Interprets scene metadata to determine sorting logic (e.g., "Class C -> Box 3")[cite: 8]. [cite_start]DeepSeek-R1 was chosen for its native Chain-of-Thought reasoning and self-reflection, which ensures robust management of the state machine during mid-task error recovery[cite: 8, 19].
-* [cite_start]**Execution Layer (Franka Panda via Isaac Sim):** Handles motion planning and grasping using the Franka Panda arm and its Inverse Kinematics (IK) solver[cite: 9, 14].
+* **Perception Layer (Qwen 3 VL):** Processes the RGB-D feed from the simulation. We selected Qwen 3 VL for its state-of-the-art visual grounding, allowing for highly accurate extraction of object classes and estimation of 3D coordinates.
+* **Reasoning Layer (DeepSeek-R1 Distilled):** Interprets scene metadata to determine sorting logic (e.g., "Class C -> Box 3"). DeepSeek-R1 was chosen for its native Chain-of-Thought reasoning and self-reflection, which ensures robust management of the state machine during mid-task error recovery.
+* **Execution Layer (Franka Panda via Isaac Sim):** Handles motion planning and grasping using the Franka Panda arm and its Inverse Kinematics (IK) solver.
 
 ## 3. API Definition & Error Handling
-[cite_start]We enforce a standardized JSON API between the Reasoning Layer and Execution Layer[cite: 11]. 
+We enforce a standardized JSON API between the Reasoning Layer and Execution Layer. 
 
 | Method | Success Code | Error Codes |
 | :--- | :--- | :--- |
@@ -20,8 +20,9 @@
 ## 4. Model Selection Analysis
 *Disclaimer: The following market analysis reflects the state of open-source models as of early 2026, when this architecture was designed.*
 
-### 4.1. [cite_start]Perception Layer (Open-Source VLM) [cite: 7]
-* **Qwen 3 VL (Selected):** * **Pros:** Dominates visual grounding natively. [cite_start]Excels at pinpointing exact pixel coordinates, making the translation to 3D coordinates highly reliable[cite: 7].
+### 4.1. Perception Layer (Open-Source VLM)
+* **Qwen 3 VL (Selected):**
+    * **Pros:** Dominates visual grounding natively. Excels at pinpointing exact pixel coordinates, making the translation to 3D coordinates highly reliable.
     * **Cons:** Slightly heavier VRAM requirement compared to ultra-light models.
 * **GLM-4.1V-Thinking:**
     * **Pros:** Incredible at complex visual reasoning via Chain-of-Thought.
@@ -30,10 +31,10 @@
     * **Pros:** Highly reliable general object classification and great ecosystem support.
     * **Cons:** Lacks the razor-sharp spatial grounding needed for precise coordinate estimation.
 
-### 4.2. [cite_start]Reasoning Layer (Open-Source Reasoning Model) [cite: 8]
+### 4.2. Reasoning Layer (Open-Source Reasoning Model)
 * **DeepSeek-R1 Distilled (Selected):**
-    * **Pros:** The gold standard for reasoning and self-reflection. [cite_start]Its native ability to "think" prevents the state machine from getting stuck in loops when handling mid-task failures like `OBJECT_FELL`[cite: 19].
-    * [cite_start]**Cons:** Output can be verbose, requiring strict system prompts to enforce the JSON API[cite: 11].
+    * **Pros:** The gold standard for reasoning and self-reflection. Its native ability to "think" prevents the state machine from getting stuck in loops when handling mid-task failures like `OBJECT_FELL`.
+    * **Cons:** Output can be verbose, requiring strict system prompts to enforce the JSON API.
 * **GLM-5 Reasoning:**
     * **Pros:** Phenomenally obedient at following API schemas and outputting pure JSON data.
     * **Cons:** Self-correction in unpredictable edge cases isn't as robust as reinforcement-learning-heavy models.
