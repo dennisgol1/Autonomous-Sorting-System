@@ -1,4 +1,4 @@
-# execution/
+# execution
 
 Defines the robot hardware interface and the state machine that drives the pick-and-place cycle.
 

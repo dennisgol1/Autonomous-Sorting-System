@@ -1,4 +1,4 @@
-# src/
+# src
 
 The main source package. Entry point is `main.py`, which wires the three pipeline layers together.
 

@@ -1,4 +1,4 @@
-# perception/
+# perception
 
 Captures a frame from the camera and uses a Vision Language Model to identify objects and their 3D positions.
 

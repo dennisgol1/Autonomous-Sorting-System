@@ -1,4 +1,4 @@
-# reasoning/
+# reasoning
 
 Takes the scene dict from the perception layer and uses a reasoning model to decide which box each object belongs in.
 
