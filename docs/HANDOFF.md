@@ -231,3 +231,113 @@ from execution.hardware_api import FrankaRobot as Robot
 3. Run Mode 3 (full pipeline) with 3 colored objects in front of camera: set `USE_VLM=True, USE_LLM=True`
 4. Check `debug/` folder — verify `_vlm_raw.txt` and `_scene.json` look correct
 5. Proceed to Isaac Sim integration (Section 7)
+
+---
+
+## 11. Remaining Development Stages (discussed 2026-03-03)
+
+### Stage 3 — Live pipeline test on Linux machine
+**Critical. Cannot skip.**
+- Pull both models, run Mode 2 then Mode 3 (see Section 10)
+- Validates full stack before touching Isaac Sim
+
+### Stage 4A — Isaac Sim sensor swap (perception)
+Replace `capture_frame()` in `src/perception/vlm_client.py` with an Isaac Sim RGB-D feed.
+
+**Chosen approach: Direct Isaac Sim Python API** (no ROS2 required, least friction)
+**ROS2 bridge kept as optional adapter** (see Section 12 for architecture)
+
+### Stage 4B — Isaac Sim robot swap (execution)
+Replace `MockFrankaRobot` with a real Franka Panda using Isaac Sim's Lula IK solver.
+- Can defer until 4A is working
+- Only two methods need implementing: `goto_pose`, `execute_grasp`, `place_in_box`
+- See Section 7.2 for the swap pattern
+
+### Stage 5 — Coordinate transform
+**Can skip for initial demo** by reading object positions directly from Isaac Sim world state instead of projecting VLM image coordinates.
+
+If implementing properly:
+- VLM outputs normalized image coords `[-0.5, 0.5]` + real Z from depth sensor
+- Need camera intrinsics + camera-to-world transform (both available from Isaac Sim)
+- Add `project_to_world(x_norm, y_norm, z_depth)` to `vlm_client.py`
+
+### Stage 6 — Prompt & parser hardening
+**Optional for demo, skip if time-constrained.**
+- Stress-test VLM with partial occlusion, two same-color objects
+- Verify `_clean_response()` handles all VLM output edge cases
+
+### Stage 7 — Documentation, screenshots, video
+**Required for assignment deliverables.**
+- Terminal output of successful 3-object cycle
+- Video: success run + failure recovery sequence
+- Add screenshots to README.md
+
+### Recommended fastest path to working demo
+1. Linux live test (Stage 3)
+2. Isaac Sim: build scene (see Section 13), swap sensor (4A), skip coord transform
+3. Swap mock robot with Lula IK (4B)
+4. Record demo video (Stage 7)
+
+---
+
+## 12. ROS2 Bridge — Optional Adapter Architecture
+
+Isaac Sim has a built-in ROS2 bridge extension (`omni.isaac.ros2_bridge`) that publishes
+camera topics automatically — no external ROS2 node setup needed. We keep ROS2 as an
+optional adapter alongside the direct API path.
+
+**Implementation plan (do this during Stage 4A):**
+
+Add `USE_ROS2` flag to `src/main.py` (alongside `USE_VLM` / `USE_LLM`).
+
+In `src/perception/vlm_client.py`, swap `capture_frame()` based on the flag:
+
+```python
+# Direct Isaac Sim API (USE_ROS2=False):
+def capture_frame(self, show_preview=False):
+    rgb = isaac_sim_camera.get_rgb()
+    depth = isaac_sim_camera.get_depth()
+    _, jpeg = cv2.imencode(".jpg", rgb)
+    return jpeg.tobytes(), rgb
+
+# ROS2 bridge (USE_ROS2=True):
+# Create a thin Ros2SensorClient that subscribes to:
+#   /camera/rgb   (sensor_msgs/Image)
+#   /camera/depth (sensor_msgs/Image)
+# and exposes the same (jpeg_bytes, raw_frame) return signature
+```
+
+Everything downstream (VLM analysis, state machine, robot) stays identical either way.
+
+**To enable the ROS2 bridge in Isaac Sim:**
+- Extensions → search `ros2_bridge` → enable
+- Isaac Sim will start publishing camera topics on launch
+
+---
+
+## 13. Isaac Sim Scene Construction
+
+**Before writing the scene script, check your Isaac Sim version:**
+```bash
+isaac-sim --version
+# or check the launcher
+```
+
+The API differs significantly:
+- **Isaac Sim 2023.x** — `from omni.isaac.core import World`, `from omni.isaac.franka import Franka`
+- **Isaac Sim 4.x (2024+)** — `isaacsim` package, different import paths
+
+**Ask the next Claude Code session to write the scene setup script** once the version is known.
+
+The scene needs:
+1. World + ground plane + table surface
+2. Franka Panda robot at a fixed base position
+3. 3 colored objects on the table: red cube (ClassA), blue cube (ClassB), green cube (ClassC)
+4. RGB-D camera mounted above the scene pointing down at the workspace
+5. 3 sorting bins positioned within robot reach (Box 1 / Box 2 / Box 3)
+6. (Optional) ROS2 bridge extension enabled for camera topic publishing
+
+Object placement constraints:
+- All 3 objects must be within Franka reach envelope (~0.85m radius from base)
+- Camera should cover all objects in a single frame
+- Bins should be outside the object pickup area but still reachable
