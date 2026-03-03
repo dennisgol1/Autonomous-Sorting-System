@@ -108,36 +108,36 @@ Press **SPACE** to capture, **Q** to cancel.
 
 ---
 
-## 5. Setup on a New Linux Machine
+## 5. Setup on the Isaac Sim Windows Machine
 
 ### 5.1 System dependencies
-```bash
-sudo apt update && sudo apt install -y python3 python3-pip git
-# Install Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-```
+- **Python 3.10+** — download from python.org if not installed
+- **Git** — download from git-scm.com if not installed
+- **Ollama** — download the Windows installer from [ollama.com](https://ollama.com/download/windows)
+
+After installing Ollama, it runs as a background service automatically on Windows.
 
 ### 5.2 Clone the repository and install Python deps
-```bash
+```powershell
 git clone <repo-url>
 cd Autonomous-Sorting-System
 pip install -r requirements.txt
 ```
 
 ### 5.3 Pull AI models (one-time, ~11GB total)
-```bash
+```powershell
 ollama pull qwen2.5vl:7b       # ~5.5GB — perception layer
 ollama pull deepseek-r1:8b     # ~5.2GB — reasoning layer
 ```
 
 ### 5.4 Verify Ollama is running
-```bash
+```powershell
 ollama list     # Should show both models
-ollama serve    # Start the server if not already running
+# Ollama runs as a Windows service — if not running, launch the Ollama app from Start menu
 ```
 
 ### 5.5 Run
-```bash
+```powershell
 cd src
 python main.py
 ```
@@ -146,6 +146,7 @@ python main.py
 
 ## 6. Target Hardware (Isaac Sim machine)
 
+- **OS:** Windows (not Linux)
 - **GPU:** NVIDIA RTX 4070 (12GB VRAM) — both models fit comfortably in VRAM
 - **CPU:** Intel Core i9-13700KF (13th gen, 16 cores)
 - **RAM:** 32GB
@@ -224,7 +225,7 @@ from execution.hardware_api import FrankaRobot as Robot
 
 ---
 
-## 10. What to Do First on the Linux Machine
+## 10. What to Do First on the Isaac Sim Windows Machine
 
 1. Follow Section 5 (setup + model pull)
 2. Run Mode 2 first to verify DeepSeek-R1 reasoning works: set `USE_VLM=False, USE_LLM=True` in `src/main.py`
@@ -236,7 +237,7 @@ from execution.hardware_api import FrankaRobot as Robot
 
 ## 11. Remaining Development Stages (discussed 2026-03-03)
 
-### Stage 3 — Live pipeline test on Linux machine
+### Stage 3 — Live pipeline test on Isaac Sim Windows machine
 **Critical. Cannot skip.**
 - Pull both models, run Mode 2 then Mode 3 (see Section 10)
 - Validates full stack before touching Isaac Sim
@@ -286,6 +287,11 @@ Isaac Sim has a built-in ROS2 bridge extension (`omni.isaac.ros2_bridge`) that p
 camera topics automatically — no external ROS2 node setup needed. We keep ROS2 as an
 optional adapter alongside the direct API path.
 
+**Windows note:** ROS2 on Windows is officially supported (ROS2 Humble/Iron have Windows builds)
+but is significantly more painful to set up than on Linux. If Isaac Sim integration is working
+well without ROS2, skip it. Only pursue this path if you specifically need the ROS2 ecosystem
+(e.g., connecting to a physical robot, using Nav2, or reusing existing ROS2 nodes).
+
 **Implementation plan (do this during Stage 4A):**
 
 Add `USE_ROS2` flag to `src/main.py` (alongside `USE_VLM` / `USE_LLM`).
@@ -312,16 +318,16 @@ Everything downstream (VLM analysis, state machine, robot) stays identical eithe
 **To enable the ROS2 bridge in Isaac Sim:**
 - Extensions → search `ros2_bridge` → enable
 - Isaac Sim will start publishing camera topics on launch
+- On Windows, also requires a sourced ROS2 environment in the same terminal before launching Isaac Sim
 
 ---
 
 ## 13. Isaac Sim Scene Construction
 
 **Before writing the scene script, check your Isaac Sim version:**
-```bash
-isaac-sim --version
-# or check the launcher
-```
+
+Check the NVIDIA Omniverse Launcher → Isaac Sim → version number shown in the library tab.
+Alternatively, inside Isaac Sim: Help → About.
 
 The API differs significantly:
 - **Isaac Sim 2023.x** — `from omni.isaac.core import World`, `from omni.isaac.franka import Franka`
