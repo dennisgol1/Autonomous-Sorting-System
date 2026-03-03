@@ -101,7 +101,34 @@ Defines the robot hardware interface and status codes. Currently a `MockFrankaRo
 - `execute_grasp()` → GRASP_SUCCESS or OBJECT_SLIPPED
 - `place_in_box(box_id)` → PLACE_SUCCESS or OBJECT_FELL
 
-**Isaac Sim swap:** add a `FrankaRobot` class that calls the Lula IK solver, then change the import in `main.py`.
+**Isaac Sim swap:** `FrankaRobot` class is implemented in this file and active when `USE_ISAAC_SIM=True` in `main.py`.
+
+#### Motion Controller: PickPlaceController + RMPflow Obstacle Registration
+
+The system uses `PickPlaceController` with **explicit obstacle registration** to enable collision-aware arm motion.
+
+**What PickPlaceController actually is:**
+Inspection of the Isaac Sim 5.1.0 source (`pick_place_controller.py`) reveals that `PickPlaceController` already uses `RMPFlowController` as its internal c-space controller:
+```python
+manipulators_controllers.PickPlaceController.__init__(
+    self,
+    cspace_controller=RMPFlowController(name=..., robot_articulation=robot_articulation),
+    ...
+)
+```
+RMPflow is the reactive motion planner that converts end-effector targets to joint commands on every physics step. `PickPlaceController` wraps it with a phase sequencer (approach → grasp → lift → transit → place → release).
+
+**Why the arm was colliding with the table:**
+RMPflow's collision avoidance only acts on obstacles **explicitly registered** with it via `add_obstacle()`. Without registration, RMPflow has no knowledge of scene geometry and plans through it. The table top and bin walls were added to the USD stage with physics collision (so dynamic cubes rest on them) but were never registered with RMPflow — so the arm moved through them freely.
+
+**The fix — obstacle registration:**
+After the world is reset and the controller is created, the table top and all bin walls are registered as static obstacles:
+```python
+self.controller._cspace_controller.add_obstacle(self._table_top, static=True)
+for wall_prim in self._bin_wall_prims:
+    self.controller._cspace_controller.add_obstacle(wall_prim, static=True)
+```
+RMPflow then generates collision-free paths that route the arm around the table surface and bin walls during every pick and place motion. This matches real-world robot behaviour, where the motion planner always treats physical surfaces as obstacles.
 
 ---
 
