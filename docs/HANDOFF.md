@@ -347,3 +347,74 @@ Object placement constraints:
 - All 3 objects must be within Franka reach envelope (~0.85m radius from base)
 - Camera should cover all objects in a single frame
 - Bins should be outside the object pickup area but still reachable
+
+---
+
+## 14. Camera System — Known Issues & Next Steps
+
+**Current state (Stage 4 commit baseline):**
+- Camera prim: `/World/CameraStandPole/Camera`
+- Position: `[0.38, 0.0, 1.35]`
+- Resolution: `640×480`
+- Orientation: `euler_angles_to_quats([0, 90, 0], degrees=True)` ← **BUG**
+
+### Bug: Camera looks sideways, not at workspace
+
+`Ry(90°)` rotates the camera's default look direction (-Z) to **-X** (horizontal),
+not downward at the table. Captured frames in `debug/` show only the floor grid,
+not the scene objects.
+
+**Fix needed** in `src/isaac_scene.py` `_add_camera_stand()`:
+```python
+# WRONG — looks along -X (horizontal):
+orientation=rot_utils.euler_angles_to_quats(np.array([0, 90, 0]), degrees=True)
+
+# CORRECT — tilt ~35° from vertical toward +Y (workspace side):
+# Rx(-35°) rotates the -Z look direction toward +Y (tilts camera to look down and forward)
+# Tune the angle to match the viewport view (workspace visible, ~30-45° from vertical)
+orientation=rot_utils.euler_angles_to_quats(np.array([-35, 0, 0]), degrees=True)
+```
+
+**Isaac Sim camera orientation convention:**
+- Identity quaternion `[1,0,0,0]` = camera looks straight down (-Z in world Z-up frame)
+- `Rx(angle)` tilts the look direction toward the +Y or -Y axis
+- `Ry(angle)` tilts the look direction toward the +X or -X axis
+- The camera stand pole is at `(0.35, -0.90)` — workspace center is at `(0.38, 0.0)`,
+  so tilting toward +Y (Rx negative angle) aims at the workspace
+- Start with `Rx(-35°)` and tune in 5° increments
+
+### DLSS Sub-Resolution Issue (non-headless mode)
+
+- 640×480 camera → DLSS renders internally at 320×240 (50% scale)
+- 240 < DLSS minimum 300px → `ERROR_OUT_OF_DEVICE_MEMORY`
+- **With ONE camera + viewport**: warning appears but MAY NOT crash (Stage 4 never called `get_rgba()` so DLSS render product was never activated — no OOM)
+- **With TWO cameras + viewport**: definitely OOMs
+- `headless=True` disables DLSS entirely (safe workaround)
+- **Resolution options**: 640×480 (current, may warn), 800×600 (safe, ~25% more VRAM), 1280×720 (large)
+- Keep 640×480 first; if OOM when calling `get_rgba()`, bump to 800×600
+
+### capture_frame.py — Deleted by Revert
+
+`src/capture_frame.py` was a standalone script for testing camera without the arm controller.
+It was deleted when reverting to Stage 4 commit. If needed:
+- Create `src/capture_frame.py` that runs `headless=False`, `with_controller=False`
+- Skip `PickPlaceController` init to avoid Warp/LLVM CUDA JIT OOM
+- Save captured frames to `debug/` with timestamp
+
+### Stage 5 Camera Work Plan
+
+1. Fix orientation bug (change `Ry(90°)` → `Rx(-35°)` or similar)
+2. Run `main.py` (headless=False, existing pipeline) — verify camera sees scene in viewport
+3. Call `IsaacScene.capture_frame()` once before the sort loop — save to `debug/`
+4. Check `debug/` image — confirm table + colored cubes + bins are visible
+5. If image is black/corrupt: increase resolution to 800×600 or run headless=True
+6. Wire `capture_frame()` output to `PerceptionClient.analyze_frame()` (Stage 5)
+
+### Camera Position Geometry
+
+Stand pole: `(x=0.35, y=-0.90)` — behind the table edge (table goes to y=-0.60)
+Camera prim: world position `(x=0.38, y=0.0, z=1.35)` — above workspace center
+- The camera prim position is independent of the stand pole prim hierarchy (`position=` is world-space)
+- Workspace objects: x≈0.35–0.55, y≈-0.15–+0.38, z≈0.425 (table top + cube)
+- Camera height 1.35m, workspace at 0.40m → vertical gap ≈ 0.95m
+- At Rx(-35°): camera looks down and toward +Y → should cover x=0.1–0.7, y=-0.5–+0.6 approximately

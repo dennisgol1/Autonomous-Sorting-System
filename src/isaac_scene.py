@@ -18,7 +18,7 @@ import isaacsim.core.utils.numpy.rotations as rot_utils
 from isaacsim.core.api import World
 from isaacsim.core.api.objects import DynamicCuboid, VisualCuboid
 from isaacsim.core.utils.stage import add_reference_to_stage, get_current_stage
-from pxr import Gf, UsdGeom, UsdPhysics
+from pxr import Gf, UsdGeom, UsdPhysics, Vt
 from isaacsim.robot.manipulators import SingleManipulator
 from isaacsim.robot.manipulators.examples.franka.controllers.pick_place_controller import PickPlaceController
 from isaacsim.robot.manipulators.grippers import ParallelGripper
@@ -258,11 +258,19 @@ class IsaacScene:
     # ---- Camera stand ----
 
     def _add_camera_stand(self) -> None:
-        """Adds a visible camera stand (pole + camera body) and the camera prim."""
-        stand_x, stand_y = 0.35, -0.90   # Outside the enlarged table (table ends at y=-0.60)
-        pole_h = 1.3
-        gray       = np.array([80, 80, 80])
-        dark_gray  = np.array([40, 40, 40])
+        """
+        Overhead camera rig: vertical pole at y=-0.90 + horizontal arm extending
+        over the workspace. Camera sits 1.80 m above the workspace center and looks
+        straight down (-Z). No Euler-angle ambiguity — identity orientation is exact.
+
+        At height 1.80 m, 60°×45° FOV covers ~1.6 m × 1.2 m at table level, which
+        fully contains all objects (y: -0.15…0.10) and all bins (y: -0.36…+0.38).
+        """
+        stand_x, stand_y = 0.35, -0.90   # pole base (outside table edge at y=-0.60)
+        cam_x,   cam_y   = 0.35,  0.00   # camera position (above workspace centre)
+        pole_h = 2.20                     # pole + arm height (m)
+        gray      = np.array([80, 80, 80])
+        dark_gray = np.array([40, 40, 40])
 
         # Vertical pole
         self.world.scene.add(VisualCuboid(
@@ -272,23 +280,54 @@ class IsaacScene:
             scale=np.array([0.03, 0.03, pole_h]),
             size=1.0, color=gray,
         ))
-        # Camera body at top of pole
+        # Horizontal arm: runs in +Y from pole top to above workspace
+        arm_y_len = cam_y - stand_y          # 0.90 m
+        arm_y_ctr = (stand_y + cam_y) / 2   # −0.45
+        self.world.scene.add(VisualCuboid(
+            prim_path="/World/CameraArm",
+            name="camera_arm",
+            position=np.array([stand_x, arm_y_ctr, pole_h]),
+            scale=np.array([0.03, arm_y_len, 0.03]),
+            size=1.0, color=gray,
+        ))
+        # Camera body (visual only)
         self.world.scene.add(VisualCuboid(
             prim_path="/World/CameraBody",
             name="camera_body",
-            position=np.array([stand_x, stand_y, pole_h + 0.02]),
+            position=np.array([cam_x, cam_y, pole_h - 0.04]),
             scale=np.array([0.07, 0.04, 0.04]),
             size=1.0, color=dark_gray,
         ))
 
-        # Actual Camera prim — overhead, centered on workspace, pointing straight down
+        # Camera prim — top-level (no parent scale), straight-down view.
+        # Isaac Sim camera default looks along +Y (horizontal). Rz(90°) rotates it
+        # to look straight down (-Z toward workspace).
+        cam_pos = np.array([cam_x, cam_y, pole_h])
         self.camera = Camera(
-            prim_path="/World/CameraStandPole/Camera",
-            position=np.array([0.38, 0.0, 1.35]),
+            prim_path="/World/Camera",
+            position=cam_pos,
             frequency=20,
             resolution=(640, 480),
             orientation=rot_utils.euler_angles_to_quats(np.array([0, 90, 0]), degrees=True),
         )
+        # Widen FOV: set focal_length via USD (default ~24mm ≈ 47°; 8mm ≈ 110° horizontal)
+        stage = get_current_stage()
+        usd_cam = UsdGeom.Camera(stage.GetPrimAtPath("/World/Camera"))
+        usd_cam.GetFocalLengthAttr().Set(8.0)
+
+        # Orange sight-line cone — child of /World/Camera, moves with it.
+        # With straight-down camera: cone hangs down from camera toward the table.
+        # Rx(-90°) rotates cone's default +Y axis to local -Z (camera look direction).
+        stage = get_current_stage()
+        cone = UsdGeom.Cone.Define(stage, "/World/Camera/SightCone")
+        cone.GetHeightAttr().Set(0.30)
+        cone.GetRadiusAttr().Set(0.04)
+        cone.GetAxisAttr().Set("Y")
+        cone.GetDisplayColorAttr().Set(Vt.Vec3fArray([Gf.Vec3f(1.0, 0.5, 0.0)]))  # orange
+        xf = UsdGeom.Xformable(cone.GetPrim())
+        xf.ClearXformOpOrder()
+        xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -0.25))
+        xf.AddRotateXOp().Set(-90.0)
 
     # ---- Franka robot ----
 
