@@ -22,7 +22,7 @@ from pxr import Gf, UsdGeom, UsdPhysics, Vt
 from isaacsim.robot.manipulators import SingleManipulator
 from isaacsim.robot.manipulators.examples.franka.controllers.pick_place_controller import PickPlaceController
 from isaacsim.robot.manipulators.grippers import ParallelGripper
-from isaacsim.sensors.camera import Camera
+from isaacsim.sensors.camera import Camera, SingleViewDepthSensorAsset
 from isaacsim.storage.native import get_assets_root_path
 
 # ---------------------------------------------------------------------------
@@ -89,7 +89,8 @@ class IsaacScene:
         self.simulation_app = simulation_app
         self.world              = None
         self.franka             = None
-        self.camera             = None
+        self.camera             = None   # overhead stand camera
+        self.wrist_camera       = None   # eye-in-hand camera on panda_hand
         self.objects: dict      = {}
         self.controller         = None
         self.articulation_controller = None
@@ -117,6 +118,7 @@ class IsaacScene:
         self._add_bins()
         self._add_camera_stand()
         self._add_franka(assets_root_path)
+        self._add_wrist_camera()
         self._init_world()
 
         print("[Isaac Scene] Scene ready.")
@@ -290,18 +292,30 @@ class IsaacScene:
             scale=np.array([0.03, arm_y_len, 0.03]),
             size=1.0, color=gray,
         ))
-        # Camera body (visual only)
-        self.world.scene.add(VisualCuboid(
-            prim_path="/World/CameraBody",
-            name="camera_body",
-            position=np.array([cam_x, cam_y, pole_h - 0.04]),
-            scale=np.array([0.07, 0.04, 0.04]),
-            size=1.0, color=dark_gray,
-        ))
+        # RealSense D455 mesh — replaces the plain VisualCuboid camera body.
+        # Loads the USD asset (visual mesh + built-in camera prim).
+        # The asset's own camera is at /World/CameraBody/RSD455/Camera_Pseudo_Depth
+        # and can be selected in the viewport dropdown for comparison.
+        rs_usd = get_assets_root_path() + "/Isaac/Sensors/Intel/RealSense/rsd455.usd"
+        rs_prim = add_reference_to_stage(usd_path=rs_usd, prim_path="/World/CameraBody")
+        rs_xf = UsdGeom.Xformable(rs_prim)
+        rs_xf.ClearXformOpOrder()
+        rs_xf.AddTranslateOp().Set(Gf.Vec3d(cam_x, cam_y, pole_h - 0.04))
+        rs_xf.AddRotateYOp().Set(90.0)
+        rs_xf.AddScaleOp().Set(Gf.Vec3f(0.01, 0.01, 0.01))   # asset is in cm → convert to m
 
-        # Camera prim — top-level (no parent scale), straight-down view.
-        # Isaac Sim camera default looks along +Y (horizontal). Rz(90°) rotates it
-        # to look straight down (-Z toward workspace).
+        # --- Option B (did not work — OV9782 camera stays black, mesh not visible) ---
+        # rs_color_path = "/World/CameraBody/RSD455/Camera_OmniVision_OV9782_Color"
+        # self.camera = Camera(prim_path=rs_color_path, frequency=20, resolution=(640, 480))
+        # stage = get_current_stage()
+        # cone = UsdGeom.Cone.Define(stage, rs_color_path + "/SightCone")
+        # cone.GetHeightAttr().Set(0.30); cone.GetRadiusAttr().Set(0.04)
+        # cone.GetAxisAttr().Set("Y")
+        # cone.GetDisplayColorAttr().Set(Vt.Vec3fArray([Gf.Vec3f(1.0, 0.5, 0.0)]))
+        # xf = UsdGeom.Xformable(cone.GetPrim()); xf.ClearXformOpOrder()
+        # xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -0.25)); xf.AddRotateXOp().Set(-90.0)
+
+        # --- Option A: custom Camera at /World/Camera — confirmed working ---
         cam_pos = np.array([cam_x, cam_y, pole_h])
         self.camera = Camera(
             prim_path="/World/Camera",
@@ -310,20 +324,13 @@ class IsaacScene:
             resolution=(640, 480),
             orientation=rot_utils.euler_angles_to_quats(np.array([0, 90, 0]), degrees=True),
         )
-        # Widen FOV: set focal_length via USD (default ~24mm ≈ 47°; 8mm ≈ 110° horizontal)
         stage = get_current_stage()
-        usd_cam = UsdGeom.Camera(stage.GetPrimAtPath("/World/Camera"))
-        usd_cam.GetFocalLengthAttr().Set(8.0)
-
-        # Orange sight-line cone — child of /World/Camera, moves with it.
-        # With straight-down camera: cone hangs down from camera toward the table.
-        # Rx(-90°) rotates cone's default +Y axis to local -Z (camera look direction).
-        stage = get_current_stage()
+        UsdGeom.Camera(stage.GetPrimAtPath("/World/Camera")).GetFocalLengthAttr().Set(8.0)
         cone = UsdGeom.Cone.Define(stage, "/World/Camera/SightCone")
         cone.GetHeightAttr().Set(0.30)
         cone.GetRadiusAttr().Set(0.04)
         cone.GetAxisAttr().Set("Y")
-        cone.GetDisplayColorAttr().Set(Vt.Vec3fArray([Gf.Vec3f(1.0, 0.5, 0.0)]))  # orange
+        cone.GetDisplayColorAttr().Set(Vt.Vec3fArray([Gf.Vec3f(1.0, 0.5, 0.0)]))
         xf = UsdGeom.Xformable(cone.GetPrim())
         xf.ClearXformOpOrder()
         xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, -0.25))
@@ -357,6 +364,43 @@ class IsaacScene:
         ))
         self.franka.gripper.set_default_state(self.franka.gripper.joint_opened_positions)
 
+    # ---- Wrist camera ----
+
+    def _add_wrist_camera(self) -> None:
+        """
+        Eye-in-hand camera mounted on panda_hand, looking along the gripper axis.
+        Being a USD child of panda_hand, it follows all arm motion automatically.
+
+        NOTE: wrist_camera.initialize() is intentionally NOT called in _init_world()
+        to avoid a second RTX render target (OOM risk on 12 GB RTX 4070).
+        """
+        self.wrist_camera = Camera(
+            prim_path="/World/Franka/panda_hand/WristCamera",
+            frequency=20,
+            resolution=(320, 240),
+        )
+        stage = get_current_stage()
+        cam_prim = stage.GetPrimAtPath("/World/Franka/panda_hand/WristCamera")
+        xf = UsdGeom.Xformable(cam_prim)
+        xf.ClearXformOpOrder()
+        # Camera native look direction = camera local +X (confirmed empirically).
+        # panda_hand +X = world -Z (downward toward table) in Isaac Sim default arm pose.
+        # No rotation needed — with ClearXformOpOrder(), camera local +X = panda_hand +X = DOWN.
+        xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.0))
+        xf.AddRotateYOp().Set(180.0)
+        UsdGeom.Camera(cam_prim).GetFocalLengthAttr().Set(10.0)
+
+        # Blue sight cone along camera +X (= look direction = world -Z = DOWN).
+        # Cone at (0.10, 0, 0) axis "X" → apex points in camera local +X = world DOWN ✓
+        cone = UsdGeom.Cone.Define(stage, "/World/Franka/panda_hand/WristCamera/SightCone")
+        cone.GetHeightAttr().Set(0.20)
+        cone.GetRadiusAttr().Set(0.025)
+        cone.GetAxisAttr().Set("X")   # apex at +X = camera look direction
+        cone.GetDisplayColorAttr().Set(Vt.Vec3fArray([Gf.Vec3f(0.2, 0.6, 1.0)]))  # blue
+        xf_c = UsdGeom.Xformable(cone.GetPrim())
+        xf_c.ClearXformOpOrder()
+        xf_c.AddTranslateOp().Set(Gf.Vec3d(0.10, 0.0, 0.0))  # 10 cm in camera +X (look dir)
+
     # ---- Static collision helper ----
 
     def _apply_static_collision(self, prim_path: str) -> None:
@@ -378,6 +422,7 @@ class IsaacScene:
     def _init_world(self) -> None:
         self.world.reset()
         self.camera.initialize()
+        self.camera.add_distance_to_image_plane_to_frame()  # enables depth output
         # end_effector_initial_height (_h1): the hover height used in Phase 0 (approach)
         # and Phase 4 (lift after grasp). Must be above the table surface (0.40m) and
         # the object centers (0.425m). 0.65m puts the EE 22cm above the table — enough
@@ -415,16 +460,23 @@ class IsaacScene:
 
     def capture_frame(self) -> tuple:
         """
-        Capture one RGB frame from the overhead camera.
-        Returns (jpeg_bytes, raw_bgr_frame) — same contract as vlm_client.capture_frame().
+        Capture one RGB+depth frame from the overhead camera.
+        Returns (jpeg_bytes, raw_bgr_frame, depth_array).
+          - jpeg_bytes   : JPEG-encoded RGB image (bytes)
+          - raw_bgr_frame: BGR numpy array (H×W×3, uint8)
+          - depth_array  : distance-to-image-plane in meters (H×W, float32);
+                           camera is at z=pole_h=2.20m looking straight down,
+                           so depth ≈ (pole_h − object_world_z).
         """
         self.world.step(render=True)
-        rgba = self.camera.get_rgba()
-        rgb  = rgba[:, :, :3].astype(np.uint8)
-        bgr  = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        rgba  = self.camera.get_rgba()
+        rgb   = rgba[:, :, :3].astype(np.uint8)
+        bgr   = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        depth = self.camera.get_depth()   # (H, W) float32, meters
         _, jpeg = cv2.imencode(".jpg", bgr)
-        print(f"[Isaac Scene] Frame captured ({jpeg.nbytes / 1024:.1f} KB).")
-        return jpeg.tobytes(), bgr
+        print(f"[Isaac Scene] Frame captured ({jpeg.nbytes / 1024:.1f} KB), "
+              f"depth shape: {depth.shape}, range: [{depth.min():.2f}, {depth.max():.2f}] m.")
+        return jpeg.tobytes(), bgr, depth
 
     # ------------------------------------------------------------------
     # World-state helpers

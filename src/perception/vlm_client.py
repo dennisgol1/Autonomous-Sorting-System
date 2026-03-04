@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 import cv2
+import numpy as np
 import ollama
 
 # Debug output directory — project root/debug/
@@ -20,8 +21,8 @@ CLASS_COLOR_MAP = {
     "green": "ClassC",
 }
 
-VISION_PROMPT = """You are a robotic vision system analyzing a workspace.
-Identify all distinct objects visible in the image.
+VISION_PROMPT = """You are a robotic vision system analyzing a top-down view of a workspace.
+Identify all distinct colored objects (cubes) visible on the table surface.
 
 For each object determine:
 - A unique id ("obj_1", "obj_2", etc.)
@@ -29,22 +30,19 @@ For each object determine:
     * Red object   -> "ClassA"
     * Blue object  -> "ClassB"
     * Green object -> "ClassC"
-- Normalized coordinates [x, y, z]:
-    * x: -0.5 (left edge of image) to +0.5 (right edge)
+- Normalized image coordinates [x, y, z]:
+    * x: -0.5 (left edge) to +0.5 (right edge)
     * y: -0.5 (bottom edge) to +0.5 (top edge)
-    * z: 0.3  (fixed depth estimate — no depth sensor on laptop)
-
-NOTE: On Isaac Sim, z will come from the real depth channel.
-For now, always set z = 0.3.
+    * z: 0.0  (placeholder — real depth will be supplied by the depth sensor)
 
 CRITICAL: Respond ONLY with a valid JSON object. No prose, no markdown code fences.
 
 Required format:
 {
   "objects": [
-    {"id": "obj_1", "class_label": "ClassA", "coords": [-0.2,  0.1, 0.3]},
-    {"id": "obj_2", "class_label": "ClassB", "coords": [ 0.0,  0.0, 0.3]},
-    {"id": "obj_3", "class_label": "ClassC", "coords": [ 0.2, -0.1, 0.3]}
+    {"id": "obj_1", "class_label": "ClassA", "coords": [-0.2,  0.1, 0.0]},
+    {"id": "obj_2", "class_label": "ClassB", "coords": [ 0.0,  0.0, 0.0]},
+    {"id": "obj_3", "class_label": "ClassC", "coords": [ 0.2, -0.1, 0.0]}
   ]
 }"""
 
@@ -113,10 +111,11 @@ class PerceptionClient:
     # Debug output
     # ------------------------------------------------------------------
 
-    def _save_debug(self, raw_frame, raw_response: str, scene: dict) -> None:
+    def _save_debug(self, raw_frame, raw_response: str, scene: dict, depth=None) -> None:
         """
-        Saves three debug artefacts to debug/ with a shared timestamp prefix:
-          YYYYMMDD_HHMMSS_frame.jpg    — the captured image
+        Saves debug artefacts to debug/ with a shared timestamp prefix:
+          YYYYMMDD_HHMMSS_frame.jpg    — the captured RGB image
+          YYYYMMDD_HHMMSS_depth.png    — colorized depth map (if depth provided)
           YYYYMMDD_HHMMSS_vlm_raw.txt  — the exact text the VLM returned
           YYYYMMDD_HHMMSS_scene.json   — the parsed & validated scene dict
         """
@@ -124,6 +123,13 @@ class PerceptionClient:
 
         frame_path = DEBUG_DIR / f"{ts}_frame.jpg"
         cv2.imwrite(str(frame_path), raw_frame)
+
+        if depth is not None:
+            depth_norm = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+            depth_color = cv2.applyColorMap(depth_norm, cv2.COLORMAP_PLASMA)
+            depth_path = DEBUG_DIR / f"{ts}_depth.png"
+            cv2.imwrite(str(depth_path), depth_color)
+            print(f"  Depth   : {depth_path.name}")
 
         raw_path = DEBUG_DIR / f"{ts}_vlm_raw.txt"
         raw_path.write_text(raw_response, encoding="utf-8")
@@ -171,11 +177,19 @@ class PerceptionClient:
         self,
         frame_bytes: bytes,
         raw_frame=None,
+        depth=None,
         save_debug: bool = True,
     ) -> dict:
         """
         Sends a JPEG frame to Qwen VL and returns parsed scene metadata.
-        If save_debug=True and raw_frame is provided, saves debug artefacts.
+
+        Args:
+            frame_bytes : JPEG bytes of the RGB frame.
+            raw_frame   : BGR numpy array for debug saving (optional).
+            depth       : (H×W) float32 depth array in meters from the depth sensor.
+                          If provided, real z values are looked up at each object's
+                          normalized (x, y) position and stored in coords[2].
+            save_debug  : Save debug artefacts to debug/ if True.
         """
         print(f"[Perception] Sending frame to {self.model}...")
 
@@ -200,8 +214,20 @@ class PerceptionClient:
         scene = json.loads(json_str)
         self._validate_scene(scene)
 
+        # Replace placeholder z=0.0 with real depth sampled at each object's pixel.
+        # Normalized coords: x ∈ [-0.5, 0.5] left→right, y ∈ [-0.5, 0.5] bottom→top.
+        # Camera looks straight down from height ~2.20 m, so depth ≈ (2.20 - world_z).
+        if depth is not None and isinstance(depth, np.ndarray):
+            h, w = depth.shape[:2]
+            for obj in scene["objects"]:
+                x_n, y_n, _ = obj["coords"]
+                px = int(np.clip((x_n + 0.5) * w, 0, w - 1))
+                py = int(np.clip((0.5 - y_n) * h, 0, h - 1))  # y: +0.5=top=row 0
+                obj["coords"][2] = round(float(depth[py, px]), 4)
+            print(f"[Perception] Depth z values applied to {len(scene['objects'])} object(s).")
+
         if save_debug and raw_frame is not None:
-            self._save_debug(raw_frame, raw, scene)
+            self._save_debug(raw_frame, raw, scene, depth=depth)
 
         print(f"[Perception] Scene validated: {len(scene['objects'])} object(s) detected.")
         return scene

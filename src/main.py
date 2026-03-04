@@ -24,6 +24,11 @@ USE_ISAAC_SIM = True    # Set True for Isaac Sim integration (Stages 4–7)
 USE_VLM       = False   # Use Qwen VL for object detection
 USE_LLM       = False   # Use DeepSeek-R1 for sort planning
 
+# Camera sanity check — set True to save one RGB frame + colorized depth map
+# to debug/ immediately after physics settle, then continue with mock pipeline.
+# No Ollama required. Check debug/capture_test_rgb.jpg and capture_test_depth.png.
+CAPTURE_TEST  = True
+
 # Show live webcam preview before capturing (webcam modes only).
 # Press SPACE to capture, Q to cancel.
 SHOW_PREVIEW = True
@@ -168,12 +173,30 @@ if __name__ == "__main__":
         scene.setup()
         scene.settle_physics(steps=60)
 
+        # --- Camera sanity check (CAPTURE_TEST=True) ---
+        # Saves RGB + depth to debug/ so you can visually confirm both channels
+        # before enabling USE_VLM. Set CAPTURE_TEST=False once satisfied.
+        if CAPTURE_TEST:
+            import cv2
+            import numpy as np
+            from pathlib import Path
+            _f_bytes, _bgr, _depth = scene.capture_frame()
+            _dbg = Path(__file__).parent.parent / "debug"
+            _dbg.mkdir(exist_ok=True)
+            cv2.imwrite(str(_dbg / "capture_test_rgb.jpg"), _bgr)
+            _d8 = cv2.normalize(_depth, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+            cv2.imwrite(str(_dbg / "capture_test_depth.png"),
+                        cv2.applyColorMap(_d8, cv2.COLORMAP_PLASMA))
+            print(f"[CAPTURE_TEST] RGB  → debug/capture_test_rgb.jpg")
+            print(f"[CAPTURE_TEST] Depth→ debug/capture_test_depth.png  "
+                  f"range [{_depth.min():.2f}, {_depth.max():.2f}] m")
+
         # --- Step 1: Perceive ---
         if USE_VLM:
             from perception.vlm_client import PerceptionClient
-            frame_bytes, raw_frame = scene.capture_frame()
+            frame_bytes, raw_frame, depth = scene.capture_frame()
             scene_metadata = PerceptionClient().analyze_frame(
-                frame_bytes, raw_frame=raw_frame, save_debug=True
+                frame_bytes, raw_frame=raw_frame, depth=depth, save_debug=True
             )
             # Override VLM coordinate estimates with exact Isaac Sim world positions.
             # VLM gives us class labels; Isaac Sim gives us precise coords.
