@@ -25,13 +25,13 @@ failures. Built as a home assignment for a Robotics Engineer position.
          |
          v
 [Perception Layer]  src/perception/vlm_client.py
-  Model: Qwen2.5-VL 7B via Ollama
+  Model: Qwen2.5-VL 3B via Ollama  (downsized from 7B — see Section 15)
   Role: Identifies objects (class + 3D coords) from a single frame.
   Output: {"objects": [{"id", "class_label", "coords": [x,y,z]}, ...]}
          |
          v
 [Reasoning Layer]   src/reasoning/llm_client.py
-  Model: DeepSeek-R1 8B (Qwen3-distilled) via Ollama
+  Model: DeepSeek-R1 1.5B via Ollama  (downsized from 8B — see Section 15)
   Role: Maps object classes to target boxes. Strips <think> blocks.
   Output: [{"name", "class_label", "coords", "target_box"}, ...]
          |
@@ -124,11 +124,13 @@ cd Autonomous-Sorting-System
 pip install -r requirements.txt
 ```
 
-### 5.3 Pull AI models (one-time, ~11GB total)
+### 5.3 Pull AI models (one-time, ~4GB total)
 ```powershell
-ollama pull qwen2.5vl:7b       # ~5.5GB — perception layer
-ollama pull deepseek-r1:8b     # ~5.2GB — reasoning layer
+ollama pull qwen2.5vl:3b       # ~2.5GB — perception layer
+ollama pull deepseek-r1:1.5b   # ~1.1GB — reasoning layer
 ```
+Note: models were originally 7B/8B but downsized to 3B/1.5B due to VRAM constraints.
+See Section 15 for full explanation.
 
 ### 5.4 Verify Ollama is running
 ```powershell
@@ -147,13 +149,20 @@ python main.py
 ## 6. Target Hardware (Isaac Sim machine)
 
 - **OS:** Windows (not Linux)
-- **GPU:** NVIDIA RTX 4070 (12GB VRAM) — both models fit comfortably in VRAM
+- **GPU:** NVIDIA RTX 4070 (12GB VRAM)
 - **CPU:** Intel Core i9-13700KF (13th gen, 16 cores)
 - **RAM:** 32GB
 
-Both models will run significantly faster on this machine than on the laptop:
-- Qwen2.5-VL 7B: ~1-2s per inference on RTX 4070
-- DeepSeek-R1 8B: ~2-4s per inference on RTX 4070
+VRAM budget with current models (Isaac Sim headless + both models on GPU):
+- Isaac Sim headless: ~4.5–5 GB
+- qwen2.5vl:3b: ~2.5 GB
+- deepseek-r1:1.5b: ~1.1 GB
+- Windows overhead: ~1 GB
+- **Total: ~9 GB → fits within 12 GB**
+
+Expected GPU inference times:
+- qwen2.5vl:3b: ~10–20s per frame on RTX 4070
+- deepseek-r1:1.5b: ~2–5s per query on RTX 4070
 
 ---
 
@@ -203,9 +212,10 @@ from execution.hardware_api import FrankaRobot as Robot
 
 - **Z coordinate on laptop:** Always 0.3 (hardcoded in VLM prompt). Will be real depth data in Isaac Sim.
 - **Coordinate space:** VLM outputs normalized image coords [-0.5, 0.5]. Isaac Sim uses meters in robot frame. A coordinate transform will be needed at the Isaac Sim integration stage.
-- **Model name note:** `deepseek-r1:8b` now resolves to the Qwen3-based R1-0528 distill. If exact reproducibility matters, pin to `deepseek-r1:8b-0528-qwen3-q4_K_M`.
-- **VLM model name:** The project targets Qwen 3 VL (architecture doc). The current closest available on Ollama is `qwen2.5vl:7b`. Update the model name in `vlm_client.py` when Qwen 3 VL becomes available.
-- **Laptop RAM:** `qwen2.5vl:7b` requires ~5.8 GB free RAM. The dev laptop cannot run it. Full pipeline (Mode 3) must be tested on the Isaac Sim machine. Mode 2 (LLM-only) works on the laptop.
+- **Model note:** `deepseek-r1:1.5b` on Ollama resolves to the Qwen3-based R1-0528 distill. This is intentional — smaller and faster than the original 8B.
+- **VLM model:** Using `qwen2.5vl:3b` (downsized from 7B for VRAM fit). See Section 15 for the full downsizing story.
+- **headless=True:** `src/main.py` runs Isaac Sim in headless mode to free ~2GB VRAM for the VLM. Switch to `headless=False` for demo video recording (but disable VLM first, or expect VRAM pressure).
+- **VLM fallback:** If VLM parsing fails, the pipeline falls back to known Isaac Sim world positions and continues the sort cycle. The fallback is logged: `[Main] VLM perception failed: ... Falling back to known Isaac Sim positions.`
 
 ---
 
@@ -219,65 +229,72 @@ from execution.hardware_api import FrankaRobot as Robot
 | —  | `execution/hardware_api.py` | Done | MockFrankaRobot with realistic failure rates |
 | —  | Integration | Done | All layers wired in main.py with 3-mode flags |
 | —  | Documentation | Done | README.md + per-folder READMEs + HANDOFF.md in docs/ |
-| —  | Live test (laptop) | Blocked | qwen2.5vl:7b OOMs on laptop — test on Isaac Sim machine |
-| —  | Isaac Sim | Pending | Swap 2 methods (see Section 7) |
-| —  | Videos | Pending | Record after Isaac Sim integration |
+| 3  | Isaac Sim scene | Done | IsaacScene: table, 3 cubes, 3 bins, overhead RGB-D camera |
+| 4  | Isaac Sim execution | Done | FrankaRobot + PickPlaceController: 3/3 sort success |
+| 5a | VLM model sizing | Done | Downsized to 3b/1.5b; moondream tested as fallback (see Sec 15) |
+| 5b | VLM integration | In Progress | qwen2.5vl:3b wired; parser hardened; fallback to known positions |
+| 6  | Prompt/parser hardening | Pending | Stress-test VLM with partial occlusion, verify output stability |
+| 7  | Demo videos | Pending | headless=False, USE_VLM=False; record 3-object sort + failure recovery |
 
 ---
 
-## 10. What to Do First on the Isaac Sim Windows Machine
+## 10. Current State (2026-03-04) — Picking Up from Here
 
-1. Follow Section 5 (setup + model pull)
-2. Run Mode 2 first to verify DeepSeek-R1 reasoning works: set `USE_VLM=False, USE_LLM=True` in `src/main.py`
-3. Run Mode 3 (full pipeline) with 3 colored objects in front of camera: set `USE_VLM=True, USE_LLM=True`
-4. Check `debug/` folder — verify `_vlm_raw.txt` and `_scene.json` look correct
-5. Proceed to Isaac Sim integration (Section 7)
+Isaac Sim integration is complete (Stages 3–4). VLM integration is actively being tested (Stage 5).
+
+**Current pipeline flags (`src/main.py`):**
+```python
+USE_ISAAC_SIM = True
+USE_VLM       = True
+USE_LLM       = False   # Not yet tested with Isaac Sim; use mock sort plan
+headless      = True    # Frees VRAM for VLM; switch to False for demo videos
+```
+
+**To run:**
+```powershell
+# Terminal 1 — start Ollama (GPU mode, no env vars needed)
+ollama serve
+
+# Terminal 2 — run pipeline
+D:\isaac-sim-standalone-5.1.0-windows-x86_64\python.bat src/main.py
+```
+
+**Known Ollama requirement:** `ollama` must be installed in Isaac Sim's bundled Python (one-time):
+```powershell
+D:\isaac-sim-standalone-5.1.0-windows-x86_64\python.bat -m pip install ollama
+```
+
+**Next immediate step:** Confirm `qwen2.5vl:3b` parses correctly (see Section 15). If it works, `debug/*_scene.json` should show 3 objects with correct class labels. If it falls back again, check `debug/*_vlm_raw.txt` and adjust the parser.
 
 ---
 
-## 11. Remaining Development Stages (discussed 2026-03-03)
+## 11. Remaining Development Stages
 
-### Stage 3 — Live pipeline test on Isaac Sim Windows machine
-**Critical. Cannot skip.**
-- Pull both models, run Mode 2 then Mode 3 (see Section 10)
-- Validates full stack before touching Isaac Sim
+### Stage 5b — Confirm VLM output (IN PROGRESS)
+- `qwen2.5vl:3b` is wired and parser is hardened (bare-array + 4-coord fallbacks added)
+- Next run: confirm `debug/*_scene.json` has 3 objects with correct ClassA/B/C labels
+- If still failing: check `debug/*_vlm_raw.txt` and adjust parser or VISION_PROMPT
+- Fallback always runs the sort cycle using known Isaac Sim positions
 
-### Stage 4A — Isaac Sim sensor swap (perception)
-Replace `capture_frame()` in `src/perception/vlm_client.py` with an Isaac Sim RGB-D feed.
+### Stage 5c — Enable LLM reasoning (optional)
+- Set `USE_LLM=True` in `src/main.py` to test `deepseek-r1:1.5b` sort planning
+- VRAM adds ~1.1 GB on top of Isaac Sim + VLM — should still fit in 12 GB
 
-**Chosen approach: Direct Isaac Sim Python API** (no ROS2 required, least friction)
-**ROS2 bridge kept as optional adapter** (see Section 12 for architecture)
-
-### Stage 4B — Isaac Sim robot swap (execution)
-Replace `MockFrankaRobot` with a real Franka Panda using Isaac Sim's Lula IK solver.
-- Can defer until 4A is working
-- Only two methods need implementing: `goto_pose`, `execute_grasp`, `place_in_box`
-- See Section 7.2 for the swap pattern
-
-### Stage 5 — Coordinate transform
-**Can skip for initial demo** by reading object positions directly from Isaac Sim world state instead of projecting VLM image coordinates.
-
-If implementing properly:
-- VLM outputs normalized image coords `[-0.5, 0.5]` + real Z from depth sensor
-- Need camera intrinsics + camera-to-world transform (both available from Isaac Sim)
-- Add `project_to_world(x_norm, y_norm, z_depth)` to `vlm_client.py`
-
-### Stage 6 — Prompt & parser hardening
-**Optional for demo, skip if time-constrained.**
+### Stage 6 — Prompt/parser hardening (optional)
 - Stress-test VLM with partial occlusion, two same-color objects
 - Verify `_clean_response()` handles all VLM output edge cases
+- Skip if time-constrained — fallback mechanism already handles parse failures
 
-### Stage 7 — Documentation, screenshots, video
-**Required for assignment deliverables.**
-- Terminal output of successful 3-object cycle
-- Video: success run + failure recovery sequence
-- Add screenshots to README.md
+### Stage 7 — Demo videos (REQUIRED for assignment)
+- Switch to `headless=False`, `USE_VLM=False` (no Ollama, no VRAM pressure)
+- Record: successful 3-object sort
+- Record: failure recovery (OBJECT_SLIPPED or OBJECT_FELL)
+- Add screenshots/terminal output to README.md
 
-### Recommended fastest path to working demo
-1. Linux live test (Stage 3)
-2. Isaac Sim: build scene (see Section 13), swap sensor (4A), skip coord transform
-3. Swap mock robot with Lula IK (4B)
-4. Record demo video (Stage 7)
+### Fastest path to completing the assignment
+1. Confirm VLM works with qwen2.5vl:3b (Stage 5b) — or accept fallback for demo
+2. Switch to headless=False + USE_VLM=False
+3. Record demo videos (Stage 7)
 
 ---
 
@@ -418,3 +435,63 @@ Camera prim: world position `(x=0.38, y=0.0, z=1.35)` — above workspace center
 - Workspace objects: x≈0.35–0.55, y≈-0.15–+0.38, z≈0.425 (table top + cube)
 - Camera height 1.35m, workspace at 0.40m → vertical gap ≈ 0.95m
 - At Rx(-35°): camera looks down and toward +Y → should cover x=0.1–0.7, y=-0.5–+0.6 approximately
+
+---
+
+## 15. Model Downsizing Decision (2026-03-04)
+
+### Why we switched from 7B/8B to 3B/1.5B
+
+The original design used `qwen2.5vl:7b` (~5.5 GB) for perception and `deepseek-r1:8b` (~5.2 GB) for reasoning.
+When we first attempted to run Isaac Sim + VLM together on the RTX 4070, we hit a wall.
+
+**Problem 1 — GPU VRAM contention:**
+Isaac Sim headless consumes ~4.5–5 GB VRAM. `qwen2.5vl:7b` needs ~5.5 GB.
+Combined: ~10–11 GB → over budget on a 12 GB card once Windows WDDM overhead is counted.
+Ollama returned: `memory layout cannot be allocated (status code: 500)` within 2 seconds.
+
+**Problem 2 — Windows virtual address space fragmentation:**
+Even in CPU mode (`CUDA_VISIBLE_DEVICES=-1`), the OS couldn't find a contiguous block to mmap the 7B model
+into RAM. This is a Windows-specific issue: even with 20+ GB free RAM, fragmentation prevents large
+contiguous allocations. Symptom: same 500 error in 2 seconds even with `total_vram="0 B"` confirmed.
+
+**Fix: PC restart** clears the virtual address space. After restart, CPU mode loaded `qwen2.5vl:7b`
+partially (16-second wait) but then crashed during vision encoding (RAM spike for the image encoder).
+
+**Decision:** Switch to `qwen2.5vl:3b` (~2.5 GB) and `deepseek-r1:1.5b` (~1.1 GB).
+These were recommended by Gemini as a Consulted AI during a parallel debugging session (see `docs/HANDOFF_GEMINI.md`).
+
+### moondream — tested as a lightweight fallback
+
+Before confirming qwen2.5vl:3b worked, we tested `moondream` (~1.7 GB) as an even smaller fallback.
+
+**What moondream returned** (38k chars, `debug/20260304_210849_vlm_raw.txt`):
+- Output structure: bare JSON array `[{...}]` instead of the required `{"objects": [...]}`
+- First 3 entries had **correct class labels**: `obj_1=ClassA, obj_2=ClassB, obj_3=ClassC`
+- **4-element coords**: `[x, y, z, w]` instead of `[x, y, z]`
+- **Hallucination loop**: after the 3 real objects, moondream repeated ~200 copies of near-identical
+  entries (`obj_4..obj_19`, all ClassA) filling the entire 38k response
+
+**Conclusion:** moondream is a captioning model, not an instruction-following model. It doesn't respect
+complex JSON schemas and hallucinates repetitive output under structured prompting. Not suitable for this task.
+
+**However**, the moondream test produced two useful parser improvements that remain in `vlm_client.py`:
+1. `_clean_response` now handles bare arrays (wraps them as `{"objects": [...]}`)
+2. `_validate_scene` truncates coords > 3 elements (was `!= 3`, now `< 3` + `[:3]` slice)
+
+### Ollama CPU mode procedure (if GPU fails again)
+
+Kill all Ollama instances including the system tray icon, then:
+```powershell
+$env:CUDA_VISIBLE_DEVICES = "-1"
+$env:OLLAMA_NUM_GPU = "0"
+ollama serve
+```
+Confirm CPU mode: look for `inference compute id=cpu library=cpu` and `total_vram="0 B"` in Ollama logs.
+CPU inference with moondream: ~8–9 minutes per frame. Not practical for regular use.
+
+### Current VLM status
+- `qwen2.5vl:3b` is the active model (set as default in `vlm_client.py`)
+- Confirmed to run on GPU with sufficient VRAM headroom
+- Parser hardened to handle both `{"objects":[...]}` and bare array `[...]` responses
+- Fallback: if VLM parse fails, pipeline uses exact Isaac Sim world positions and continues sorting

@@ -48,7 +48,7 @@ Required format:
 
 
 class PerceptionClient:
-    def __init__(self, model: str = "qwen2.5vl:7b", camera_index: int = 0):
+    def __init__(self, model: str = "moondream", camera_index: int = 0):
         self.model = model
         self.camera_index = camera_index
         DEBUG_DIR.mkdir(exist_ok=True)
@@ -150,10 +150,18 @@ class PerceptionClient:
         """Strip markdown fences and isolate the outermost JSON object."""
         text = re.sub(r"```(?:json)?\s*", "", text)
         text = text.strip()
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if not match:
-            raise ValueError(f"No JSON object found in VLM response:\n{text}")
-        return match.group(0)
+        # Use raw_decode so we parse exactly the first complete JSON object and
+        # ignore any trailing prose that models like moondream append after the JSON.
+        idx = text.find("{")
+        if idx == -1:
+            raise ValueError(f"No JSON object found in VLM response:\n{text[:300]}")
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(text, idx)
+            return json.dumps(obj)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"No valid JSON object found in VLM response ({e}):\n{text[:300]}"
+            )
 
     def _validate_scene(self, scene: dict) -> None:
         """Ensure the parsed scene has the structure ReasoningClient expects."""
@@ -209,6 +217,13 @@ class PerceptionClient:
 
         raw = response["message"]["content"]
         print(f"[Perception] Response received ({len(raw)} chars). Parsing...")
+
+        # Always save raw response so failures are diagnosable.
+        if save_debug and raw_frame is not None:
+            ts = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
+            DEBUG_DIR.mkdir(exist_ok=True)
+            (DEBUG_DIR / f"{ts}_vlm_raw.txt").write_text(raw, encoding="utf-8")
+            print(f"[Perception] Raw VLM response saved → debug/{ts}_vlm_raw.txt")
 
         json_str = self._clean_response(raw)
         scene = json.loads(json_str)

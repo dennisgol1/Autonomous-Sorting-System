@@ -16,14 +16,29 @@ Takes the scene dict from the perception layer and uses a reasoning model to dec
 
 ```json
 [
-  {"name": "obj_1", "class_label": "ClassA", "coords": [-0.2, 0.1, 0.3], "target_box": 1},
-  {"name": "obj_2", "class_label": "ClassB", "coords": [ 0.0, 0.0, 0.3], "target_box": 2},
-  {"name": "obj_3", "class_label": "ClassC", "coords": [ 0.2,-0.1, 0.3], "target_box": 3}
+  {
+    "name": "obj_1",
+    "class_label": "ClassA",
+    "coords": [-0.2, 0.1, 0.3],
+    "target_box": 1
+  },
+  {
+    "name": "obj_2",
+    "class_label": "ClassB",
+    "coords": [0.0, 0.0, 0.3],
+    "target_box": 2
+  },
+  {
+    "name": "obj_3",
+    "class_label": "ClassC",
+    "coords": [0.2, -0.1, 0.3],
+    "target_box": 3
+  }
 ]
 ```
 
 ## Notes
 
-- Model: `deepseek-r1:8b` (~5.2 GB). On Ollama this now resolves to the Qwen3-based R1-0528 distill.
+- Model: `deepseek-r1:1.5b` (~5.2 GB). On Ollama this now resolves to the Qwen3-based R1-0528 distill.
 - DeepSeek-R1 uses Chain-of-Thought internally (`<think>` blocks) before producing the final answer. These are stripped automatically — only the JSON reaches the state machine.
 - The system prompt enforces strict JSON output and the class-to-box mapping rules.

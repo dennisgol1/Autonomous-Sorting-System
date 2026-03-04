@@ -35,8 +35,8 @@ Required output schema:
 
 
 class ReasoningClient:
-    def __init__(self, model: str = "deepseek-r1:8b"):
-        # Note: deepseek-r1:8b now points to the Qwen3-based R1-0528 distill (~5.2GB)
+    def __init__(self, model: str = "deepseek-r1:1.5b"):
+        # Note: deepseek-r1:1.5b now points to the Qwen3-based R1-0528 distill (~5.2GB)
         self.model = model
         print(f"[Reasoning] Initialized ReasoningClient (model: {self.model})")
 

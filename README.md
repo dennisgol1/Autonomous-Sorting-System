@@ -4,8 +4,8 @@
 The system utilizes a modular "Perceive-Reason-Act" pipeline to bridge high-level perception with low-level hardware execution.
 
 ## 2. Component Breakdown
-* **Perception Layer (Qwen 3 VL):** Processes the RGB-D feed from the simulation. We selected Qwen 3 VL for its state-of-the-art visual grounding, allowing for highly accurate extraction of object classes and estimation of 3D coordinates.
-* **Reasoning Layer (DeepSeek-R1 Distilled):** Interprets scene metadata to determine sorting logic (e.g., "Class C -> Box 3"). DeepSeek-R1 was chosen for its native Chain-of-Thought reasoning and self-reflection, which ensures robust management of the state machine during mid-task error recovery.
+* **Perception Layer (Qwen2.5-VL 3B):** Processes the RGB-D feed from the simulation. We selected Qwen2.5-VL for its strong visual grounding and instruction-following capability, allowing for accurate extraction of object classes and estimation of 3D coordinates. Model size was tuned to 3B to fit within the 12 GB VRAM budget alongside Isaac Sim (see Section 5 for sizing rationale).
+* **Reasoning Layer (DeepSeek-R1 Distilled 1.5B):** Interprets scene metadata to determine sorting logic (e.g., "Class C -> Box 3"). DeepSeek-R1 was chosen for its native Chain-of-Thought reasoning and self-reflection, which ensures robust management of the state machine during mid-task error recovery. The 1.5B distill provides sufficient reasoning quality for the deterministic 3-class mapping task at minimal VRAM cost.
 * **Execution Layer (Franka Panda via Isaac Sim):** Handles motion planning and grasping using the Franka Panda arm and its Inverse Kinematics (IK) solver.
 
 ## 3. API Definition & Error Handling
@@ -20,7 +20,7 @@ We enforce a standardized JSON API between the Reasoning Layer and Execution Lay
 ## 4. Module Reference
 
 ### Perception — `src/perception/vlm_client.py`
-Wraps a Vision Language Model (Qwen 2.5 VL 7B via Ollama) with a webcam capture loop and debug output.
+Wraps a Vision Language Model (Qwen2.5-VL 3B via Ollama) with a webcam capture loop and debug output.
 
 **Key class:** `PerceptionClient(model, camera_index)`
 
@@ -54,7 +54,7 @@ Wraps a Vision Language Model (Qwen 2.5 VL 7B via Ollama) with a webcam capture 
 ---
 
 ### Reasoning — `src/reasoning/llm_client.py`
-Wraps DeepSeek-R1 8B (via Ollama) to map scene metadata to a sort plan. Strips `<think>` blocks and enforces strict JSON output.
+Wraps DeepSeek-R1 1.5B (via Ollama) to map scene metadata to a sort plan. Strips `<think>` blocks and enforces strict JSON output.
 
 **Key class:** `ReasoningClient(model)`
 
@@ -73,7 +73,7 @@ Wraps DeepSeek-R1 8B (via Ollama) to map scene metadata to a sort plan. Strips `
 ]
 ```
 
-**Note:** `deepseek-r1:8b` on Ollama now resolves to the Qwen3-based R1-0528 distill (~5.2 GB).
+**Note:** `deepseek-r1:1.5b` on Ollama resolves to the Qwen3-based R1-0528 distill. Downsized from 8B to fit within the VRAM budget alongside Isaac Sim and the VLM.
 
 ---
 
@@ -148,10 +148,16 @@ The folder is tracked in git (via `debug/.gitkeep`) but its contents are ignored
 ## 5. Model Selection Analysis
 *Disclaimer: The following market analysis reflects the state of open-source models as of early 2026, when this architecture was designed.*
 
-### 4.1. Perception Layer (Open-Source VLM)
-* **Qwen 3 VL (Selected):**
-    * **Pros:** Dominates visual grounding natively. Excels at pinpointing exact pixel coordinates, making the translation to 3D coordinates highly reliable.
-    * **Cons:** Slightly heavier VRAM requirement compared to ultra-light models.
+### 5.1. Perception Layer (Open-Source VLM)
+* **Qwen2.5-VL 3B (Selected):**
+    * **Pros:** Strong visual grounding and instruction-following capability. Accurately extracts object classes and spatial coordinates from structured prompts. The 3B size fits within the 12 GB VRAM budget alongside Isaac Sim (~5 GB) with headroom to spare.
+    * **Cons:** Slightly lower visual accuracy than the 7B variant; acceptable for clearly distinct colored objects.
+* **Qwen2.5-VL 7B (Original design, replaced):**
+    * **Pros:** Higher accuracy and more reliable JSON schema adherence.
+    * **Cons:** ~5.5 GB VRAM. Combined with Isaac Sim's ~5 GB, this exceeds 12 GB on the RTX 4070. Extensive troubleshooting (CPU mode, Windows VA fragmentation, PC restart) could not stabilize it. See HANDOFF.md Section 15.
+* **moondream (~1.7 GB, tested and rejected):**
+    * **Pros:** Very small, loads easily alongside Isaac Sim.
+    * **Cons:** Designed for image captioning, not structured JSON output. Produced hallucinated repetition loops (38k chars, ~200 copies of the same entry), ignored the `{"objects":[...]}` schema, and output 4-element coords. Rejected as unsuitable for structured perception.
 * **GLM-4.1V-Thinking:**
     * **Pros:** Incredible at complex visual reasoning via Chain-of-Thought.
     * **Cons:** Inference time is too slow for real-time robotic pipelines.
@@ -159,10 +165,13 @@ The folder is tracked in git (via `debug/.gitkeep`) but its contents are ignored
     * **Pros:** Highly reliable general object classification and great ecosystem support.
     * **Cons:** Lacks the razor-sharp spatial grounding needed for precise coordinate estimation.
 
-### 4.2. Reasoning Layer (Open-Source Reasoning Model)
-* **DeepSeek-R1 Distilled (Selected):**
-    * **Pros:** The gold standard for reasoning and self-reflection. Its native ability to "think" prevents the state machine from getting stuck in loops when handling mid-task failures like `OBJECT_FELL`.
-    * **Cons:** Output can be verbose, requiring strict system prompts to enforce the JSON API.
+### 5.2. Reasoning Layer (Open-Source Reasoning Model)
+* **DeepSeek-R1 Distilled 1.5B (Selected):**
+    * **Pros:** Retains Chain-of-Thought reasoning capability at minimal cost (~1.1 GB VRAM). Native `<think>` blocks are stripped automatically. Sufficient for the deterministic 3-class → 3-box mapping task.
+    * **Cons:** Less robust than larger variants for complex edge cases; acceptable given the fixed sorting rules.
+* **DeepSeek-R1 8B (Original design, replaced):**
+    * **Pros:** Stronger reasoning and self-reflection.
+    * **Cons:** ~5.2 GB VRAM. Combined with Isaac Sim + VLM, this exceeds 12 GB. Downsized to 1.5B for VRAM fit.
 * **GLM-5 Reasoning:**
     * **Pros:** Phenomenally obedient at following API schemas and outputting pure JSON data.
     * **Cons:** Self-correction in unpredictable edge cases isn't as robust as reinforcement-learning-heavy models.

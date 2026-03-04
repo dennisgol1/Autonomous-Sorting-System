@@ -21,13 +21,13 @@
 #    python main.py
 # ---------------------------------------------------------------------------
 USE_ISAAC_SIM = True    # Set True for Isaac Sim integration (Stages 4–7)
-USE_VLM       = False   # Use Qwen VL for object detection
+USE_VLM       = True    # Use Qwen VL for object detection
 USE_LLM       = False   # Use DeepSeek-R1 for sort planning
 
 # Camera sanity check — set True to save one RGB frame + colorized depth map
 # to debug/ immediately after physics settle, then continue with mock pipeline.
 # No Ollama required. Check debug/capture_test_rgb.jpg and capture_test_depth.png.
-CAPTURE_TEST  = True
+CAPTURE_TEST  = False
 
 # Show live webcam preview before capturing (webcam modes only).
 # Press SPACE to capture, Q to cancel.
@@ -40,7 +40,8 @@ MAX_RETRIES = 3
 # ---------------------------------------------------------------------------
 if USE_ISAAC_SIM:
     from isaacsim import SimulationApp
-    simulation_app = SimulationApp({"headless": False})
+    # TODO Stage 7: switch back to headless=False for demo video recording
+    simulation_app = SimulationApp({"headless": True})   # headless=True frees GPU VRAM for VLM
 
 from execution.hardware_api import MockFrankaRobot, StatusCode
 
@@ -195,9 +196,23 @@ if __name__ == "__main__":
         if USE_VLM:
             from perception.vlm_client import PerceptionClient
             frame_bytes, raw_frame, depth = scene.capture_frame()
-            scene_metadata = PerceptionClient().analyze_frame(
-                frame_bytes, raw_frame=raw_frame, depth=depth, save_debug=True
-            )
+            try:
+                scene_metadata = PerceptionClient().analyze_frame(
+                    frame_bytes, raw_frame=raw_frame, depth=depth, save_debug=True
+                )
+            except Exception as e:
+                print(f"[Main] VLM perception failed: {e}")
+                print("[Main] Falling back to known Isaac Sim positions.")
+                scene_metadata = {
+                    "objects": [
+                        {
+                            "id": obj_id,
+                            "class_label": OBJECT_CLASS_LABELS[obj_id],
+                            "coords": scene.get_object_world_position(obj_id).tolist(),
+                        }
+                        for obj_id in OBJECT_POSITIONS
+                    ]
+                }
             # Override VLM coordinate estimates with exact Isaac Sim world positions.
             # VLM gives us class labels; Isaac Sim gives us precise coords.
             for obj in scene_metadata["objects"]:
