@@ -48,7 +48,7 @@ Required format:
 
 
 class PerceptionClient:
-    def __init__(self, model: str = "moondream", camera_index: int = 0):
+    def __init__(self, model: str = "qwen2.5vl:3b", camera_index: int = 0):
         self.model = model
         self.camera_index = camera_index
         DEBUG_DIR.mkdir(exist_ok=True)
@@ -150,17 +150,24 @@ class PerceptionClient:
         """Strip markdown fences and isolate the outermost JSON object."""
         text = re.sub(r"```(?:json)?\s*", "", text)
         text = text.strip()
-        # Use raw_decode so we parse exactly the first complete JSON object and
-        # ignore any trailing prose that models like moondream append after the JSON.
-        idx = text.find("{")
-        if idx == -1:
-            raise ValueError(f"No JSON object found in VLM response:\n{text[:300]}")
+        arr_idx = text.find("[")
+        obj_idx = text.find("{")
+        # If a bare array comes first, wrap it as {"objects": [...]}.
+        # Some models (e.g. moondream) skip the top-level wrapper.
+        if arr_idx != -1 and (obj_idx == -1 or arr_idx < obj_idx):
+            try:
+                arr, _ = json.JSONDecoder().raw_decode(text, arr_idx)
+                return json.dumps({"objects": arr})
+            except json.JSONDecodeError:
+                pass  # fall through to object search
+        if obj_idx == -1:
+            raise ValueError(f"No JSON found in VLM response:\n{text[:300]}")
         try:
-            obj, _ = json.JSONDecoder().raw_decode(text, idx)
+            obj, _ = json.JSONDecoder().raw_decode(text, obj_idx)
             return json.dumps(obj)
         except json.JSONDecodeError as e:
             raise ValueError(
-                f"No valid JSON object found in VLM response ({e}):\n{text[:300]}"
+                f"No valid JSON found in VLM response ({e}):\n{text[:300]}"
             )
 
     def _validate_scene(self, scene: dict) -> None:
@@ -172,10 +179,11 @@ class PerceptionClient:
             missing = required_keys - set(obj.keys())
             if missing:
                 raise ValueError(f"Object {i} missing keys: {missing}. Got: {obj}")
-            if not isinstance(obj["coords"], list) or len(obj["coords"]) != 3:
+            if not isinstance(obj["coords"], list) or len(obj["coords"]) < 3:
                 raise ValueError(
                     f"Object {i} 'coords' must be [x, y, z]. Got: {obj['coords']}"
                 )
+            obj["coords"] = obj["coords"][:3]  # trim any extra elements
 
     # ------------------------------------------------------------------
     # VLM inference
