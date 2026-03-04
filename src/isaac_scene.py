@@ -59,6 +59,11 @@ OBJECT_CLASS_LABELS = {
     "obj_3": "ClassC",
 }
 
+# Arm configuration that folds the arm toward -Y (away from objects and camera center).
+# Used before VLM capture so the arm body doesn't block the overhead camera view.
+# 7 arm joints + 2 gripper finger joints (open at 0.04 m).
+PARK_JOINTS = np.array([-1.5708, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04])
+
 # Bin drop-off positions (inside the open-top bin, slightly above floor of bin).
 # All bins sit on the table surface.
 BIN_POSITIONS = {
@@ -453,6 +458,99 @@ class IsaacScene:
         print(f"[Isaac Scene] Settling physics ({steps} steps)...")
         for _ in range(steps):
             self.world.step(render=True)
+
+    def park_arm_for_capture(self, steps: int = 120) -> None:
+        """
+        Teleport the arm to PARK_JOINTS and hold it there for VLM frame capture.
+
+        set_joint_positions() teleports the arm but does NOT update PhysX joint
+        drive targets. Strong position drives then pull the arm back to the default
+        configuration within one step. Calling apply_action() with the same positions
+        updates the drive targets so physics actively holds PARK_JOINTS throughout
+        the settle steps. render=True ensures the camera render target is updated.
+        """
+        from isaacsim.core.utils.types import ArticulationAction
+        n_dof = self.franka.num_dof
+        park = PARK_JOINTS[:n_dof]
+        print(f"[Isaac Scene] Parking arm for VLM capture (DOFs: {n_dof})...")
+        # Teleport joints immediately (bypasses physics interpolation)
+        self.franka.set_joint_positions(park)
+        self.franka.set_joint_velocities(np.zeros(n_dof))
+        # Update drive targets so PhysX holds the parked pose (not default pose)
+        self.articulation_controller.apply_action(ArticulationAction(joint_positions=park))
+        # Render steps so camera image reflects the parked arm position
+        for _ in range(steps):
+            self.world.step(render=True)
+        print("[Isaac Scene] Arm parked.")
+
+    def _pixel_to_world(self, px: int, py: int, depth: np.ndarray) -> np.ndarray | None:
+        """
+        Back-project pixel (px, py) to world coordinates using the overhead
+        camera's intrinsics matrix and a depth sample.
+
+        Axis mapping for Ry(90deg) nadir camera (derived from scene geometry):
+          cam +X -> world -Y    cam +Y -> world -X    cam +Z -> world -Z
+
+        Formulas:
+          world_x = cam_x - (py - cy) * d / fy
+          world_y = cam_y - (px - cx) * d / fx
+          world_z = cam_z - d
+        """
+        d = float(depth[py, px])
+        if d <= 0.01:           # degenerate / no surface
+            return None
+        K  = self.camera.get_intrinsics_matrix()
+        fx, fy = float(K[0, 0]), float(K[1, 1])
+        cx, cy = float(K[0, 2]), float(K[1, 2])
+        cam_x, cam_y, cam_z = 0.35, 0.00, 2.20   # overhead camera world position
+        world_x = cam_x - (py - cy) * d / fy
+        world_y = cam_y - (px - cx) * d / fx
+        world_z = cam_z - d
+        return np.array([round(world_x, 4), round(world_y, 4), round(world_z, 4)])
+
+    def localize_by_color(
+        self, class_label: str, bgr_frame: np.ndarray, depth: np.ndarray
+    ) -> np.ndarray | None:
+        """
+        Locate a colored sorting object by HSV segmentation and back-project its
+        centroid pixel to world coordinates using depth.
+
+        x, y, z are all derived from the depth camera + camera intrinsics:
+          - x, y: from pixel centroid back-projection
+          - z: cam_z - depth_sample (directly from depth sensor)
+
+        Color-to-class mapping matches the VLM prompt:
+          ClassA = Red,  ClassB = Blue,  ClassC = Green
+        Returns None if the color is not visible in the frame.
+        """
+        hsv = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2HSV)
+        if class_label == "ClassA":        # Red wraps in hue
+            mask = cv2.bitwise_or(
+                cv2.inRange(hsv, np.array([  0, 120,  70]), np.array([ 10, 255, 255])),
+                cv2.inRange(hsv, np.array([170, 120,  70]), np.array([180, 255, 255])),
+            )
+        elif class_label == "ClassB":      # Blue
+            mask = cv2.inRange(hsv, np.array([100, 120, 70]), np.array([130, 255, 255]))
+        elif class_label == "ClassC":      # Green
+            mask = cv2.inRange(hsv, np.array([ 40,  70, 70]), np.array([ 80, 255, 255]))
+        else:
+            return None
+        # Exclude background pixels: table-level surfaces are at depth 1.0–1.95m.
+        # Ground plane renders at depth ≈2.20m; this eliminates floor-tile false positives
+        # without any per-color saturation tuning.
+        depth_mask = ((depth > 1.00) & (depth < 1.95)).astype(np.uint8) * 255
+        mask = cv2.bitwise_and(mask, depth_mask)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        c = max(contours, key=cv2.contourArea)
+        M = cv2.moments(c)
+        if M["m00"] == 0:
+            return None
+        px = int(M["m10"] / M["m00"])
+        py = int(M["m01"] / M["m00"])
+        print(f"[Isaac Scene] Color seg {class_label}: centroid pixel ({px}, {py})")
+        return self._pixel_to_world(px, py, depth)
 
     # ------------------------------------------------------------------
     # Camera capture

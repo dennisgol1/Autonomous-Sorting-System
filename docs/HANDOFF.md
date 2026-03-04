@@ -232,15 +232,16 @@ from execution.hardware_api import FrankaRobot as Robot
 | 3  | Isaac Sim scene | Done | IsaacScene: table, 3 cubes, 3 bins, overhead RGB-D camera |
 | 4  | Isaac Sim execution | Done | FrankaRobot + PickPlaceController: 3/3 sort success |
 | 5a | VLM model sizing | Done | Downsized to 3b/1.5b; moondream tested as fallback (see Sec 15) |
-| 5b | VLM integration | In Progress | qwen2.5vl:3b wired; parser hardened; fallback to known positions |
+| 5b | VLM integration | Done | qwen2.5vl:3b wired; parser hardened; fallback to known positions |
+| 5c | Coord transform | Done | HSV color seg + depth back-projection; 3/3 sort success ~10mm XY (see Sec 16) |
 | 6  | Prompt/parser hardening | Pending | Stress-test VLM with partial occlusion, verify output stability |
 | 7  | Demo videos | Pending | headless=False, USE_VLM=False; record 3-object sort + failure recovery |
 
 ---
 
-## 10. Current State (2026-03-04) — Picking Up from Here
+## 10. Current State (2026-03-05) — Stage 5c Complete
 
-Isaac Sim integration is complete (Stages 3–4). VLM integration is actively being tested (Stage 5).
+Full VLM pipeline is working end-to-end. 3/3 sort success using camera-derived coordinates.
 
 **Current pipeline flags (`src/main.py`):**
 ```python
@@ -264,37 +265,40 @@ D:\isaac-sim-standalone-5.1.0-windows-x86_64\python.bat src/main.py
 D:\isaac-sim-standalone-5.1.0-windows-x86_64\python.bat -m pip install ollama
 ```
 
-**Next immediate step:** Confirm `qwen2.5vl:3b` parses correctly (see Section 15). If it works, `debug/*_scene.json` should show 3 objects with correct class labels. If it falls back again, check `debug/*_vlm_raw.txt` and adjust the parser.
+**Localization accuracy (Stage 5c result):**
+| Class | Localized | Actual | XY Error |
+|-------|-----------|--------|----------|
+| ClassA (Red) | (0.407, 0.107, 0.45) | (0.40, 0.10, 0.425) | ~9mm |
+| ClassB (Blue) | (0.357, -0.143, 0.45) | (0.35, -0.15, 0.425) | ~10mm |
+| ClassC (Green) | (0.508, 0.007, 0.45) | (0.50, 0.00, 0.425) | ~10mm |
+
+**Next step:** Stage 7 — demo videos (see Section 11).
 
 ---
 
 ## 11. Remaining Development Stages
 
-### Stage 5b — Confirm VLM output (IN PROGRESS)
-- `qwen2.5vl:3b` is wired and parser is hardened (bare-array + 4-coord fallbacks added)
-- Next run: confirm `debug/*_scene.json` has 3 objects with correct ClassA/B/C labels
-- If still failing: check `debug/*_vlm_raw.txt` and adjust parser or VISION_PROMPT
-- Fallback always runs the sort cycle using known Isaac Sim positions
+### Stage 5b — Confirm VLM output — DONE ✓
+- `qwen2.5vl:3b` wired, parser hardened, 3/3 class labels identified correctly
 
-### Stage 5c — Enable LLM reasoning (optional)
-- Set `USE_LLM=True` in `src/main.py` to test `deepseek-r1:1.5b` sort planning
-- VRAM adds ~1.1 GB on top of Isaac Sim + VLM — should still fit in 12 GB
+### Stage 5c — Color seg + depth back-projection — DONE ✓
+- HSV color segmentation + depth masking → pixel centroid → world coords
+- 3/3 sort success, ~10mm XY accuracy (see Section 16)
 
 ### Stage 6 — Prompt/parser hardening (optional)
 - Stress-test VLM with partial occlusion, two same-color objects
 - Verify `_clean_response()` handles all VLM output edge cases
 - Skip if time-constrained — fallback mechanism already handles parse failures
 
-### Stage 7 — Demo videos (REQUIRED for assignment)
+### Stage 7 — Demo videos (REQUIRED for assignment) ← NEXT
 - Switch to `headless=False`, `USE_VLM=False` (no Ollama, no VRAM pressure)
-- Record: successful 3-object sort
-- Record: failure recovery (OBJECT_SLIPPED or OBJECT_FELL)
+- Record: successful 3-object sort (set `USE_ISAAC_SIM=True, USE_VLM=False, USE_LLM=False`)
+- Record: failure recovery — run with `USE_ISAAC_SIM=False` using `MockFrankaRobot`
 - Add screenshots/terminal output to README.md
 
 ### Fastest path to completing the assignment
-1. Confirm VLM works with qwen2.5vl:3b (Stage 5b) — or accept fallback for demo
-2. Switch to headless=False + USE_VLM=False
-3. Record demo videos (Stage 7)
+1. Switch to `headless=False`, `USE_VLM=False`, `USE_LLM=False`
+2. Record demo videos (Stage 7)
 
 ---
 
@@ -495,3 +499,139 @@ CPU inference with moondream: ~8–9 minutes per frame. Not practical for regula
 - Confirmed to run on GPU with sufficient VRAM headroom
 - Parser hardened to handle both `{"objects":[...]}` and bare array `[...]` responses
 - Fallback: if VLM parse fails, pipeline uses exact Isaac Sim world positions and continues sorting
+
+---
+
+## 16. Stage 5c — Color Segmentation & Depth Back-Projection (2026-03-05)
+
+### What was built
+
+After Stage 5b confirmed that `qwen2.5vl:3b` correctly identifies class labels (ClassA/B/C),
+Stage 5c added precise world-coordinate localization from the camera image.
+VLM coordinates were rough image-space estimates and not suitable for pick-and-place.
+The solution: use VLM only for class labels, then re-localize each object from scratch using color + depth.
+
+**Three new methods added to `IsaacScene` (`src/isaac_scene.py`):**
+
+#### `park_arm_for_capture(steps=120)`
+
+Teleports the arm to a folded-away pose before the VLM snapshot so the arm doesn't block the camera view.
+
+The fix that made it work:
+- `set_joint_positions(park)` alone teleports the arm but **does not update PhysX drive targets**.
+  The stiff position drives then pull the arm back to the default configuration within a single physics step.
+- Must also call `apply_action(ArticulationAction(joint_positions=park))` to update drive targets.
+- Steps must be `render=True` so the render pipeline sees the new configuration.
+
+```python
+PARK_JOINTS = np.array([-1.5708, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04])
+
+def park_arm_for_capture(self, steps: int = 120):
+    self.franka.set_joint_positions(PARK_JOINTS)
+    self.franka.set_joint_velocities(np.zeros(9))
+    self.articulation_controller.apply_action(
+        ArticulationAction(joint_positions=PARK_JOINTS)
+    )
+    for _ in range(steps):
+        self.world.step(render=True)
+```
+
+#### `_pixel_to_world(px, py, depth)`
+
+Pinhole back-projection using the camera intrinsics matrix from Isaac Sim.
+
+Camera geometry: position `[0.35, 0.00, 2.20]`, orientation `Ry(90°)` (nadir / straight down).
+
+Axis mapping derived from the rotation:
+- cam +X → world −Y
+- cam +Y → world −X
+- cam +Z → world −Z (depth increases downward)
+
+```python
+def _pixel_to_world(self, px: int, py: int, depth: np.ndarray):
+    d = float(depth[py, px])
+    if d <= 0.01:
+        return None
+    K  = self.camera.get_intrinsics_matrix()
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    cam_x, cam_y, cam_z = 0.35, 0.00, 2.20
+    world_x = cam_x - (py - cy) * d / fy
+    world_y = cam_y - (px - cx) * d / fx
+    world_z = cam_z - d
+    return np.array([round(world_x, 4), round(world_y, 4), round(world_z, 4)])
+```
+
+#### `localize_by_color(class_label, bgr_frame, depth)`
+
+HSV color segmentation → depth masking → centroid → back-projection.
+
+Color ranges (HSV):
+- ClassA (Red): H=0–10 + 170–180, S≥120, V≥70 (red wraps in hue)
+- ClassB (Blue): H=100–130, S≥120, V≥70
+- ClassC (Green): H=40–80, S≥70, V≥70
+
+Depth mask: `(depth > 1.00) & (depth < 1.95)` — table objects sit at 1.70–1.90m from the
+nadir camera, ground plane at 2.20m. These bands are completely separate so the mask cleanly
+rejects all background before contour detection.
+
+---
+
+### The ClassB false-positive struggle
+
+ClassB (blue cube) was the hardest to localize correctly because Isaac Sim's floor tiles render
+as medium blue — the same hue range as the cube.
+
+**Run 1 — S_min=120:**
+- Color mask lit up on floor tile region
+- Centroid: pixel (153, 112), depth=2.20m → back-projection gave world z≈0 (ground plane)
+- The cube centroid was at depth 1.86m, but the tile mask overwhelmed it
+
+**Run 2 — S_min=180 (tighter saturation):**
+- Tile region saturates at S≈80–120, so tightening S_min to 180 killed those pixels
+- But the mask moved to a *different* background pixel: centroid (597, 335), depth=2.20m → world z≈0 again
+- Root cause: tiles vary in saturation across the frame; tuning S_min just moved the false positive,
+  it didn't fix it
+
+**Fix: depth masking**
+
+The insight was that the depth bands are completely separate:
+- Table objects (cubes): depth ≈ 1.70–1.90m from nadir camera
+- Ground plane / floor tiles: depth ≈ 2.20m
+
+Applying `(depth > 1.00) & (depth < 1.95)` before `findContours` masked out all background pixels
+regardless of their color. ClassB S_min was reverted back to 120 (no saturation tuning needed).
+
+After the fix: ClassB centroid moved to the cube's actual position, depth=1.86m, correct world coords.
+
+---
+
+### Final localization accuracy
+
+| Class | Localized (x, y, z) | Actual (x, y, z) | XY Error |
+|-------|---------------------|-----------------|----------|
+| ClassA (Red) | (0.407, 0.107, 0.45) | (0.400, 0.100, 0.425) | ~9mm |
+| ClassB (Blue) | (0.357, -0.143, 0.45) | (0.350, -0.150, 0.425) | ~10mm |
+| ClassC (Green) | (0.508, 0.007, 0.45) | (0.500, 0.000, 0.425) | ~10mm |
+
+**z=0.45m** is correct behavior: depth samples the cube's top face (height 0.425m + small offset),
+and the gripper approaches from above — this is the right hover target.
+
+**3/3 sort success. No Isaac Sim position fallback used.**
+
+### Integration in `main.py`
+
+The Isaac Sim world-position override block (from Stage 5b) was commented out and replaced with
+a `localize_by_color` loop. If color segmentation fails for any object, the pipeline falls back
+to the exact Isaac Sim world position for that object.
+
+```python
+for obj in scene_metadata["objects"]:
+    world_xyz = scene.localize_by_color(obj["class_label"], raw_frame, depth)
+    if world_xyz is not None:
+        obj["coords"] = world_xyz.tolist()
+    else:
+        # Color not found — fall back to known Isaac Sim position
+        if obj["id"] in scene.objects:
+            obj["coords"] = scene.get_object_world_position(obj["id"]).tolist()
+```

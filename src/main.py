@@ -195,6 +195,7 @@ if __name__ == "__main__":
         # --- Step 1: Perceive ---
         if USE_VLM:
             from perception.vlm_client import PerceptionClient
+            scene.park_arm_for_capture()   # fold arm out of camera view before VLM snapshot
             frame_bytes, raw_frame, depth = scene.capture_frame()
             try:
                 scene_metadata = PerceptionClient().analyze_frame(
@@ -213,12 +214,27 @@ if __name__ == "__main__":
                         for obj_id in OBJECT_POSITIONS
                     ]
                 }
+            # Stage 5c: replaced by localize_by_color() below — comment kept for easy revert
             # Override VLM coordinate estimates with exact Isaac Sim world positions.
             # VLM gives us class labels; Isaac Sim gives us precise coords.
+            # for obj in scene_metadata["objects"]:
+            #     obj_id = obj["id"]
+            #     if obj_id in scene.objects:
+            #         obj["coords"] = scene.get_object_world_position(obj_id).tolist()
+
+            # Replace VLM coordinate estimates with color-segmented + back-projected
+            # world positions. x,y from pixel centroid, z from depth sensor directly.
             for obj in scene_metadata["objects"]:
-                obj_id = obj["id"]
-                if obj_id in scene.objects:
-                    obj["coords"] = scene.get_object_world_position(obj_id).tolist()
+                world_xyz = scene.localize_by_color(obj["class_label"], raw_frame, depth)
+                if world_xyz is not None:
+                    print(f"[Main] {obj['id']} ({obj['class_label']}) localized -> {world_xyz}")
+                    obj["coords"] = world_xyz.tolist()
+                else:
+                    # Color not found — fall back to known Isaac Sim position
+                    obj_id = obj["id"]
+                    if obj_id in scene.objects:
+                        obj["coords"] = scene.get_object_world_position(obj_id).tolist()
+                        print(f"[Main] {obj['id']}: color seg failed, using Isaac Sim fallback")
         else:
             # Use known class labels + exact world positions from Isaac Sim
             scene_metadata = {
@@ -237,14 +253,15 @@ if __name__ == "__main__":
             from reasoning.llm_client import ReasoningClient
             sort_plan = ReasoningClient().generate_sort_plan(scene_metadata)
         else:
+            CLASS_TO_BOX = {"ClassA": 1, "ClassB": 2, "ClassC": 3}
             sort_plan = [
                 {
-                    "name": obj_id,
-                    "class_label": OBJECT_CLASS_LABELS[obj_id],
-                    "coords": scene.get_object_world_position(obj_id).tolist(),
-                    "target_box": i + 1,
+                    "name": obj["id"],
+                    "class_label": obj["class_label"],
+                    "coords": obj["coords"],    # VLM label + back-projected x,y,z
+                    "target_box": CLASS_TO_BOX.get(obj["class_label"], i + 1),
                 }
-                for i, obj_id in enumerate(OBJECT_POSITIONS)
+                for i, obj in enumerate(scene_metadata["objects"])
             ]
 
         # --- Step 3: Act ---
