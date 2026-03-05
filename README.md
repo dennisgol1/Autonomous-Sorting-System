@@ -3,6 +3,8 @@
 ## 1. System Overview
 The system utilizes a modular "Perceive-Reason-Act" pipeline to bridge high-level perception with low-level hardware execution.
 
+![Isaac Sim Scene Overview](Screenshots/Screenshot%202026-03-03%20174647.png)
+
 ## 2. Component Breakdown
 * **Perception Layer (Qwen2.5-VL 3B):** Processes the RGB-D feed from the simulation. We selected Qwen2.5-VL for its strong visual grounding and instruction-following capability, allowing for accurate extraction of object classes and estimation of 3D coordinates. Model size was tuned to 3B to fit within the 12 GB VRAM budget alongside Isaac Sim (see Section 5 for sizing rationale).
 * **Reasoning Layer (DeepSeek-R1 Distilled 1.5B):** Interprets scene metadata to determine sorting logic (e.g., "Class C -> Box 3"). DeepSeek-R1 was chosen for its native Chain-of-Thought reasoning and self-reflection, which ensures robust management of the state machine during mid-task error recovery. The 1.5B distill provides sufficient reasoning quality for the deterministic 3-class mapping task at minimal VRAM cost.
@@ -21,6 +23,8 @@ We enforce a standardized JSON API between the Reasoning Layer and Execution Lay
 
 ### Perception — `src/perception/vlm_client.py`
 Wraps a Vision Language Model (Qwen2.5-VL 3B via Ollama) with a webcam capture loop and debug output.
+
+![Overhead Camera View — what the VLM sees](Screenshots/Screenshot%202026-03-05%20190811.png)
 
 **Key class:** `PerceptionClient(model, camera_index)`
 
@@ -55,6 +59,8 @@ Wraps a Vision Language Model (Qwen2.5-VL 3B via Ollama) with a webcam capture l
 
 ### Reasoning — `src/reasoning/llm_client.py`
 Wraps DeepSeek-R1 1.5B (via Ollama) to map scene metadata to a sort plan. Strips `<think>` blocks and enforces strict JSON output.
+
+![Full pipeline running — VLM labels, LLM sort plan, state machine execution](Screenshots/Screenshot%202026-03-05%20184444.png)
 
 **Key class:** `ReasoningClient(model)`
 
@@ -103,6 +109,8 @@ Defines the robot hardware interface and status codes. Currently a `MockFrankaRo
 
 **Isaac Sim swap:** `FrankaRobot` class is implemented in this file and active when `USE_ISAAC_SIM=True` in `main.py`.
 
+![Franka arm executing pick-and-place](Screenshots/Screenshot%202026-03-05%20191309.png)
+
 #### Motion Controller: PickPlaceController + RMPflow Obstacle Registration
 
 The system uses `PickPlaceController` with **explicit obstacle registration** to enable collision-aware arm motion.
@@ -142,6 +150,56 @@ Auto-created on first run when `USE_VLM=True` and `save_debug=True`. Each run sa
 | `YYYYMMDD_HHMMSS_scene.json` | Validated scene dict passed to the reasoning layer |
 
 The folder is tracked in git (via `debug/.gitkeep`) but its contents are ignored (see `.gitignore`).
+
+---
+
+## 6. Demo & Verification
+
+### Pipeline Flags (`src/main.py`)
+
+| Flag | Default | Purpose |
+| :--- | :--- | :--- |
+| `USE_ISAAC_SIM` | `True` | Isaac Sim integration (Modes 4–6) |
+| `USE_VLM` | `True` | Qwen2.5-VL 3B object detection |
+| `USE_LLM` | `True` | DeepSeek-R1 1.5B sort planning |
+| `DEMO_MODE` | `True` | `True` → headless=False + perspective viewport camera |
+| `RANDOM_SPAWN` | `True` | `True` → cubes teleported to random table positions each run |
+
+![All 3 objects sorted into correct bins — sort cycle complete](Screenshots/Screenshot%202026-03-05%20163637.png)
+
+### Verification Run Matrix
+
+| Phase | Flag settings | Verifies | Status |
+| :--- | :--- | :--- | :--- |
+| 1 — Smoke test | `USE_VLM=F, USE_LLM=F` | Scene builds, 3/3 sort, no crashes | ✓ Done |
+| 2 — Full pipeline | `USE_VLM=T, USE_LLM=T` | VLM labels + LLM sort plan + 3/3 success | ✓ Done |
+| 3 — Random spawn | Phase 2 + `RANDOM_SPAWN=T` | Color seg finds objects at unknown positions | ✓ Done |
+| 4 — Demo camera | `USE_VLM=F + DEMO_MODE=T` | Perspective viewport + bin markers visible | ✓ Done |
+| 5 — Record Video 1 | `DEMO_MODE=T, RANDOM_SPAWN=T, USE_VLM=T, USE_LLM=T` | Full autonomous sort | ✓ Done |
+| 6 — Record Video 2 | Full Isaac Sim, `demo_drop_second=True` | Physical drop + re-localization + retry | ✓ Done |
+
+Run with Isaac Sim's Python (Phases 1–5):
+```powershell
+D:\isaac-sim-standalone-5.1.0-windows-x86_64\python.bat src/main.py
+```
+Run with system Python (Phase 6):
+```powershell
+python src/main.py
+```
+
+### Assignment Done Criteria
+
+![Error recovery — OBJECT_FELL detected, camera re-localizes cube, retry succeeds](Screenshots/Screenshot%202026-03-05%20191813.png)
+
+| # | Check | Pass criteria |
+| :--- | :--- | :--- |
+| A1 | VLM identifies 3 object classes | Terminal shows `ClassA/B/C` for all 3 objects |
+| A2 | LLM generates sort plan | Terminal shows `target_box: 1/2/3` |
+| A3 | Franka executes 3/3 pick-and-place | `[OK] obj_1/2/3` in state machine summary |
+| A4 | Error recovery demonstrated | `OBJECT_FELL → camera re-localize → retry → success` in terminal |
+| A5 | Architecture document | This README covers all 4 modules |
+| A6 | Video: successful 3-object sort | Cubes sorted into correct colored bins |
+| A7 | Video: failure recovery | Retry cycle visible in terminal output |
 
 ---
 

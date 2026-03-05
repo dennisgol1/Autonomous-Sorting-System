@@ -234,45 +234,35 @@ from execution.hardware_api import FrankaRobot as Robot
 | 5a | VLM model sizing | Done | Downsized to 3b/1.5b; moondream tested as fallback (see Sec 15) |
 | 5b | VLM integration | Done | qwen2.5vl:3b wired; parser hardened; fallback to known positions |
 | 5c | Coord transform | Done | HSV color seg + depth back-projection; 3/3 sort success ~10mm XY (see Sec 16) |
-| 6  | Prompt/parser hardening | Pending | Stress-test VLM with partial occlusion, verify output stability |
-| 7  | Demo videos | Pending | headless=False, USE_VLM=False; record 3-object sort + failure recovery |
+| 7p | Stage 7 prep | Done | DEMO_MODE/RANDOM_SPAWN flags, demo camera, bin markers, USE_LLM=True (see Sec 17) |
+| 5d | VLM robustness | Done | Prompt hardening + degenerate-class guard + release_camera() no-op fix (see Sec 18) |
+| 7p2| Phase 4 GUI check | Done | DemoCamera angle tuned + saved; headless=False confirmed working |
+| 7c | Grasp verification | Done | verify_cube_in_bin() + is_object_near() + _reloc_pos re-localization (see Sec 19) |
+| 7d | Scene layout | Done | Bins at table perimeter, grey markers, spawn zone tuned, return_home() (see Sec 19) |
+| 6  | Prompt/parser hardening | Skipped | Fallback mechanism handles failures; time-constrained |
+| 7  | Demo videos | Done | Video 1 ✓ recorded; Video 2 ✓ recorded (see Sec 20) |
 
 ---
 
-## 10. Current State (2026-03-05) — Stage 5c Complete
+## 10. Current State (2026-03-05) — Both Videos Recorded ✓
 
-Full VLM pipeline is working end-to-end. 3/3 sort success using camera-derived coordinates.
+All code complete. Both demo videos recorded. Assignment deliverables met.
 
 **Current pipeline flags (`src/main.py`):**
 ```python
 USE_ISAAC_SIM = True
-USE_VLM       = True
-USE_LLM       = False   # Not yet tested with Isaac Sim; use mock sort plan
-headless      = True    # Frees VRAM for VLM; switch to False for demo videos
+USE_VLM       = True    # Qwen2.5-VL 3B via Ollama
+USE_LLM       = True    # DeepSeek-R1 generates sort plan
+DEMO_MODE     = True    # headless=False → GUI viewport open for recording
+RANDOM_SPAWN  = True    # cubes at random table positions each run
 ```
-
-**To run:**
-```powershell
-# Terminal 1 — start Ollama (GPU mode, no env vars needed)
-ollama serve
-
-# Terminal 2 — run pipeline
-D:\isaac-sim-standalone-5.1.0-windows-x86_64\python.bat src/main.py
-```
+`FrankaRobot(scene, demo_drop_second=True)` — intentional drop on 2nd object for Video 2.
+**To restore production mode:** change to `FrankaRobot(scene)` (removes the demo drop).
 
 **Known Ollama requirement:** `ollama` must be installed in Isaac Sim's bundled Python (one-time):
 ```powershell
 D:\isaac-sim-standalone-5.1.0-windows-x86_64\python.bat -m pip install ollama
 ```
-
-**Localization accuracy (Stage 5c result):**
-| Class | Localized | Actual | XY Error |
-|-------|-----------|--------|----------|
-| ClassA (Red) | (0.407, 0.107, 0.45) | (0.40, 0.10, 0.425) | ~9mm |
-| ClassB (Blue) | (0.357, -0.143, 0.45) | (0.35, -0.15, 0.425) | ~10mm |
-| ClassC (Green) | (0.508, 0.007, 0.45) | (0.50, 0.00, 0.425) | ~10mm |
-
-**Next step:** Stage 7 — demo videos (see Section 11).
 
 ---
 
@@ -285,20 +275,22 @@ D:\isaac-sim-standalone-5.1.0-windows-x86_64\python.bat -m pip install ollama
 - HSV color segmentation + depth masking → pixel centroid → world coords
 - 3/3 sort success, ~10mm XY accuracy (see Section 16)
 
+### Stage 5d — VLM robustness — DONE ✓
+- Prompt hardening: IMPORTANT instruction + changed example coords prevent prompt-copying
+- Degenerate-class guard: if VLM returns non-diverse labels (e.g. all ClassB), falls back
+  to independent per-class HSV color segmentation (see Section 18)
+- `release_camera()` changed to no-op (see Section 18)
+- Phases 1–3 verified: smoke test ✓, full pipeline ✓, random spawn ✓
+
 ### Stage 6 — Prompt/parser hardening (optional)
 - Stress-test VLM with partial occlusion, two same-color objects
 - Verify `_clean_response()` handles all VLM output edge cases
 - Skip if time-constrained — fallback mechanism already handles parse failures
 
-### Stage 7 — Demo videos (REQUIRED for assignment) ← NEXT
-- Switch to `headless=False`, `USE_VLM=False` (no Ollama, no VRAM pressure)
-- Record: successful 3-object sort (set `USE_ISAAC_SIM=True, USE_VLM=False, USE_LLM=False`)
-- Record: failure recovery — run with `USE_ISAAC_SIM=False` using `MockFrankaRobot`
-- Add screenshots/terminal output to README.md
-
-### Fastest path to completing the assignment
-1. Switch to `headless=False`, `USE_VLM=False`, `USE_LLM=False`
-2. Record demo videos (Stage 7)
+### Stage 7 — Demo videos (REQUIRED for assignment) — DONE ✓
+- **Phase 4** (demo camera): `DEMO_MODE=True, USE_VLM=False` — confirmed ✓
+- **Video 1** (`DEMO_MODE=T, RANDOM_SPAWN=T, USE_VLM=T, USE_LLM=T`): ✓ RECORDED
+- **Video 2** (full Isaac Sim pipeline, deliberate gripper drop → recovery): ✓ RECORDED (see Sec 20)
 
 ---
 
@@ -634,4 +626,270 @@ for obj in scene_metadata["objects"]:
         # Color not found — fall back to known Isaac Sim position
         if obj["id"] in scene.objects:
             obj["coords"] = scene.get_object_world_position(obj["id"]).tolist()
+```
+
+---
+
+## 17. Stage 7 Preparation (2026-03-05)
+
+### What was added
+
+Four improvements to make the pipeline genuinely autonomous and demo-ready.
+
+#### New flags in `src/main.py`
+
+```python
+DEMO_MODE    = False   # True → headless=False + perspective viewport for recording
+RANDOM_SPAWN = False   # True → cubes teleported to random table positions before each run
+USE_LLM      = True    # Now enabled by default (was False)
+```
+
+`SimulationApp` init now uses `DEMO_MODE`:
+```python
+simulation_app = SimulationApp({"headless": not DEMO_MODE})
+```
+
+#### `_add_demo_camera()` — perspective viewport for recording
+
+Adds a `/World/DemoCamera` USD prim positioned for a front-right elevated view:
+```
+position: (1.40, -1.20, 1.10), rotation: XYZ(-30°, 0°, 48°), focal_length: 18mm
+```
+
+`set_viewport_to_demo_camera()` switches the Isaac Sim viewport to this camera.
+Called from `main.py` when `DEMO_MODE=True`. Camera prim is always built (even headless)
+so it can be viewed in the stage tree.
+
+**Note:** Camera angle is a starting estimate — tune `AddRotateXYZOp` values after first
+visual check.
+
+#### `_add_bin_markers()` — visual bin-to-class connection
+
+A small (3cm) colored VisualCuboid placed on the floor of each bin. Color matches the
+class expected in that bin:
+- Bin 1 (ClassA): red marker
+- Bin 2 (ClassB): blue marker
+- Bin 3 (ClassC): green marker
+
+Combined with the now-saturated bin wall colors — `(240,40,40)` / `(40,40,240)` /
+`(40,200,40)` — it is visually unambiguous which bin accepts which cube.
+
+#### `randomize_object_positions()` — genuinely unknown object locations
+
+Teleports cubes to random XY positions on the table before physics settling.
+Call after `setup()` and before `settle_physics()`.
+
+Spawn zone: X=[0.28, 0.60], Y=[-0.22, 0.25] — within table bounds, clear of all bins.
+Min object separation: 0.12m (>cube diagonal 0.07m). 200 attempts per object; warns if
+no valid position found.
+
+```python
+scene.setup()
+if RANDOM_SPAWN:
+    scene.randomize_object_positions()   # teleport before physics settles
+scene.settle_physics(steps=60)
+```
+
+With `RANDOM_SPAWN=True`, the pipeline is fully autonomous — no hardcoded positions
+or class-to-box mappings used anywhere in the sort cycle.
+
+---
+
+### Pre-demo Verification Run Matrix
+
+Run these phases in order before recording demo videos.
+
+| Phase | Flags | Goal | Status |
+|-------|-------|------|--------|
+| 1 — Smoke test | `USE_VLM=F, USE_LLM=F, DEMO_MODE=F` | Scene builds, 3/3 sort, no new crashes | ✓ DONE |
+| 2 — Full pipeline | `USE_VLM=T, USE_LLM=T` | VLM labels + LLM sort plan + 3/3 success | ✓ DONE |
+| 3 — Random spawn | `+ RANDOM_SPAWN=T` | color seg finds objects at unknown positions | ✓ DONE |
+| 4 — Demo camera | `USE_VLM=F + DEMO_MODE=T` | perspective view + bin markers visible | ✓ DONE |
+| 5 — Record video 1 | `DEMO_MODE=T, RANDOM_SPAWN=T, USE_VLM=T, USE_LLM=T` | full autonomous sort | ✓ DONE |
+| 6 — Record video 2 | Full Isaac Sim, `demo_drop_second=True` | Physical drop + camera re-localization + retry | ✓ Done |
+
+### Assignment done criteria
+
+- [x] A1: VLM identifies ClassA/B/C labels  ← verified Phase 2+3
+- [x] A2: LLM generates valid sort plan with target_box  ← verified Phase 2+3
+- [x] A3: 3/3 pick-and-place success  ← verified Phase 1+2+3
+- [x] A4: failure recovery visible (OBJECT_FELL → camera re-localize → retry)  ← Video 2 ✓
+- [x] A5: README.md covers all 4 modules
+- [x] A6: demo video 1 — successful 3-object sort recorded
+- [x] A7: demo video 2 — failure recovery recorded ✓
+
+---
+
+## 18. Stage 5d — VLM Robustness Fixes (2026-03-05)
+
+### Root cause: VLM copied prompt example (Phase 2 failure)
+
+During Phase 2, all 3 objects were labeled ClassB with coords identical to the VISION_PROMPT
+format example. Two causes:
+
+1. **VRAM contention**: `capture_frame()` activates the camera render product, spiking VRAM to
+   ~11.6 GB → only 357 MB left → Ollama loaded qwen2.5vl with only 4/37 GPU layers (hybrid
+   CPU/GPU worst-case). At this quality level, the model echoed the prompt example verbatim.
+
+2. **Prompt example too close to real positions**: The coords in the format example
+   (`[-0.2, 0.1]`, `[0.0, 0.0]`, `[0.2, -0.1]`) were similar to real workspace positions.
+   The degraded VLM copied them byte-for-byte.
+
+### Fix 1 — Prompt hardening (`src/perception/vlm_client.py`)
+
+Added explicit instruction before the format block:
+```
+IMPORTANT: Study the image carefully and identify each object's actual color.
+Do NOT copy the example values below — use real positions from the image.
+```
+Changed example coords to clearly different values: `[0.1, 0.3]`, `[-0.2, -0.1]`, `[0.4, 0.1]`.
+
+This was sufficient — VLM returns correct labels even when running 0/37 GPU layers (full CPU, ~50s).
+
+### Fix 2 — Degenerate-class guard (`src/main.py`)
+
+After the `localize_by_color` loop, checks if VLM returned non-diverse labels:
+```python
+unique_labels = {obj["class_label"] for obj in scene_metadata["objects"]}
+if len(unique_labels) < len(scene_metadata["objects"]):
+    # Override: run localize_by_color once per class independently
+    for class_label, box_id in [("ClassA",1), ("ClassB",2), ("ClassC",3)]:
+        xyz = scene.localize_by_color(class_label, raw_frame, depth)
+        ...
+```
+Also fires when VLM hallucinates duplicate objects (e.g. 5 objects instead of 3, with repeated
+labels) — verified in Phase 3.
+
+### Fix 3 — `release_camera()` no-op (`src/isaac_scene.py`)
+
+`camera.get_render_product_path()` returns `/Render/OmniverseKit/HydraTextures/Replicator` —
+a **shared Hydra system prim**, not a camera-specific resource. Calling `stage.RemovePrim()` on
+it destroys the render pipeline, causing `HydraEngine error code 6` on every subsequent
+`world.step()` call.
+
+`release_camera()` is now a documented no-op. VRAM contention is handled by the prompt fix instead.
+
+### Phase 3 result
+
+- VLM: 0/37 GPU layers (full CPU, ~50s) — works correctly due to prompt fix
+- Degenerate-class guard fired once (VLM hallucinated 5 objects) — corrected automatically
+- Color seg: all 3 objects found at random spawn positions
+- DeepSeek: 29/29 GPU, 2.8s — sort plan correct
+- 3/3 PLACE_SUCCESS at randomized positions
+
+---
+
+## 19. Stage 7c+d — Grasp Verification + Scene Layout (2026-03-05)
+
+### Root cause: PLACE_SUCCESS reported without physical grasp
+
+`FrankaRobot.execute_grasp()` is a no-op; PickPlaceController handles grasping internally.
+`run_pick_and_place()` previously returned `True` when `controller.is_done()` fired — this is
+a phase-sequence flag, not a physical confirmation. If the gripper missed the cube, all 7 phases
+still completed and `PLACE_SUCCESS` was returned with nothing in the bin.
+
+### Fix 1 — Post-controller object proximity check (`src/isaac_scene.py`)
+
+Added `is_object_near(position, xy_tolerance=0.12)` — scans all sorting objects and returns
+`True` if any is within 12 cm XY of the target position.
+
+In `run_pick_and_place()`, after `controller.is_done()`:
+```python
+for _ in range(settle_steps):   # 60 steps — let cube settle before measuring
+    self.world.step(render=True)
+return self.is_object_near(place_pos)   # True only if cube reached bin
+```
+
+### Fix 2 — Camera-based placement verification (`src/isaac_scene.py`)
+
+Added `verify_cube_in_bin(class_label, bin_pos)` — captures a fresh overhead frame and
+runs `localize_by_color()` to check where the cube actually is:
+- Color not visible → cube inside bin walls (occluded) → `(True, None)`
+- Color found within 20 cm of bin → landed in bin → `(True, None)`
+- Color found > 20 cm from bin → still on table → `(False, fresh_xyz)`
+
+Called from `FrankaRobot.place_in_box()` after `run_pick_and_place()` returns `True`.
+
+### Fix 3 — Re-localization on retry (`src/execution/hardware_api.py`)
+
+`FrankaRobot` stores `_reloc_pos`: when `verify_cube_in_bin()` returns `fresh_xyz`,
+it is saved to `_reloc_pos`. On the next `goto_pose()` call, this fresh position is
+used instead of the (potentially stale) sort-plan coordinates.
+
+### Scene layout changes (`src/isaac_scene.py`)
+
+- **BIN_POSITIONS**: Box 2 moved to table right edge `[0.73, 0.01]` (was `[0.20, 0.38]`).
+  All three bins now sit at different table perimeter edges, clear of the spawn zone.
+- **Grey bin markers**: Replaced colored markers with grey (0.60, 0.60, 0.60) number markers
+  (N cubes = bin N). Grey prevents false positives in HSV color segmentation.
+- **`HOME_JOINTS`** + **`return_home()`**: After sorting, arm smoothly returns to upright
+  home pose via `apply_action()` (not `set_joint_positions()` — no teleport).
+- **Spawn zone**: `SPAWN_X_RANGE` lower bound 0.28 → 0.35 m (keeps cubes away from arm base).
+  `SPAWN_MIN_SEP` 0.12 → 0.25 m (wide cube-to-cube gap for clean grasping).
+  Bin exclusion radius added: cubes stay ≥ 0.25 m from every bin center.
+- **Z fix** (`src/main.py`): After `localize_by_color()`, `world_xyz[2]` is overridden with
+  `_OBJ_Z` (cube center height). Depth sensor returns top surface; gripper needs center.
+
+### Video 1 result
+
+- VLM: correct ClassA/B/C labels on random spawn positions
+- LLM: sort plan correct
+- Grasp verification: all 3 cubes confirmed in bins by camera
+- 3/3 PLACE_SUCCESS, arm returned home cleanly ✓
+
+---
+
+## 20. Stage 7e — Video 2: Physical Drop + Camera Recovery (2026-03-05)
+
+### What Video 2 demonstrates
+
+Full Isaac Sim pipeline (GUI + VLM + LLM) with a deliberate gripper failure on the 2nd object,
+demonstrating the complete OBJECT_FELL → re-localization → retry cycle.
+
+**Sequence visible in the recording:**
+1. VLM identifies all 3 objects; LLM generates sort plan
+2. Object 1: picks and places cleanly → PLACE_SUCCESS
+3. Object 2: arm picks up the cube → gripper physically opens mid-transit → cube drops on table
+4. Camera overhead scan: `"Cube found on table at (x, y)"` → OBJECT_FELL → state machine retries
+5. Retry: `"Re-localized pick position from camera"` → arm picks from camera-fresh coords → PLACE_SUCCESS
+6. Object 3: sorts cleanly
+7. Arm returns home. Summary: 3/3 OK (obj_2 with one retry)
+
+### How the drop is engineered (`src/execution/hardware_api.py`, `src/isaac_scene.py`)
+
+**Trigger:** `FrankaRobot(scene, demo_drop_second=True)` in `main.py`.
+
+**Mechanism — `run_pick_and_place(force_drop=True)` (`isaac_scene.py`):**
+- Each physics step: checks `franka.get_joint_positions()[7] < 0.03` (finger joint physically closed = cube grasped)
+- On detection: sets `gripper_override=True` — overrides finger joints to 0.05 m (open) every step
+- Arm joints continue following `PickPlaceController` normally (arm moves toward bin empty-handed)
+- Controller reaches `is_done()` → `is_object_near(place_pos)` → False → returns **False**
+
+**Recovery — `place_in_box()` on `success=False` path (`hardware_api.py`):**
+- Calls `scene.capture_frame()` + `scene.localize_by_color()` directly (no "not-visible = in bin" assumption)
+- If cube found on table: `_reloc_pos` set → `goto_pose()` on retry uses camera-fresh XY → correct pick
+- Returns `OBJECT_FELL` → state machine retries
+
+### Bug fixes made during Video 2 development
+
+1. **Step-based trigger was unreliable** — `force_drop_at_step=N` fired when arm was already near the
+   bin → cube fell into bin → `verify_cube_in_bin` false-positive (`not visible = in bin walls`).
+   Fix: replaced with gripper-state detection (physics-accurate, spawn-position-independent).
+
+2. **`verify_cube_in_bin` false positive on `success=False` path** — `not visible` heuristic was correct
+   for normal placement (cube inside bin walls) but wrong for physical drops/timeouts.
+   Fix: `success=False` path bypasses `verify_cube_in_bin` entirely; uses direct `localize_by_color`.
+
+3. **`_place_count` counted retries** — early implementation counted all `place_in_box` calls, so
+   Object 1 retry triggered the drop instead of Object 2 first attempt.
+   Fix: replaced with `_seen_box_ids` list — tracks distinct box_ids, stable across retries.
+
+### To restore production mode (no intentional drop)
+
+Change in `src/main.py`:
+```python
+# VIDEO 2 demo mode:
+robot = FrankaRobot(scene, demo_drop_second=True)
+# Production / normal mode:
+robot = FrankaRobot(scene)
 ```

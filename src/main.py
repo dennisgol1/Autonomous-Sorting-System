@@ -20,9 +20,9 @@
 #  Run webcam modes with system Python (from src/):
 #    python main.py
 # ---------------------------------------------------------------------------
-USE_ISAAC_SIM = True    # Set True for Isaac Sim integration (Stages 4–7)
-USE_VLM       = True    # Use Qwen VL for object detection
-USE_LLM       = False   # Use DeepSeek-R1 for sort planning
+USE_ISAAC_SIM = True    # Video 2: full Isaac Sim pipeline — Franka drops + recovers
+USE_VLM       = True    # Video 2: VLM labels objects
+USE_LLM       = True    # Video 2: LLM generates sort plan
 
 # Camera sanity check — set True to save one RGB frame + colorized depth map
 # to debug/ immediately after physics settle, then continue with mock pipeline.
@@ -33,6 +33,14 @@ CAPTURE_TEST  = False
 # Press SPACE to capture, Q to cancel.
 SHOW_PREVIEW = True
 
+# Demo mode — headless=False + perspective viewport camera for screen recording.
+# Set True when recording demo videos. headless=True frees VRAM for VLM inference.
+DEMO_MODE = True
+
+# Random spawn — teleport cubes to random positions on the table before each run.
+# Exercises the full pipeline with genuinely unknown object locations.
+RANDOM_SPAWN = True
+
 MAX_RETRIES = 3
 
 # ---------------------------------------------------------------------------
@@ -40,8 +48,7 @@ MAX_RETRIES = 3
 # ---------------------------------------------------------------------------
 if USE_ISAAC_SIM:
     from isaacsim import SimulationApp
-    # TODO Stage 7: switch back to headless=False for demo video recording
-    simulation_app = SimulationApp({"headless": True})   # headless=True frees GPU VRAM for VLM
+    simulation_app = SimulationApp({"headless": not DEMO_MODE})
 
 from execution.hardware_api import MockFrankaRobot, StatusCode
 
@@ -166,12 +173,16 @@ if __name__ == "__main__":
     # Isaac Sim path (Modes 4–6)
     # -----------------------------------------------------------------------
     if USE_ISAAC_SIM:
-        from isaac_scene import IsaacScene, OBJECT_CLASS_LABELS, OBJECT_POSITIONS
+        from isaac_scene import IsaacScene, OBJECT_CLASS_LABELS, OBJECT_POSITIONS, _OBJ_Z
         from execution.hardware_api import FrankaRobot
 
         # Build scene + warm up physics
         scene = IsaacScene(simulation_app)
         scene.setup()
+        if DEMO_MODE:
+            scene.set_viewport_to_demo_camera()
+        if RANDOM_SPAWN:
+            scene.randomize_object_positions()
         scene.settle_physics(steps=60)
 
         # --- Camera sanity check (CAPTURE_TEST=True) ---
@@ -197,6 +208,7 @@ if __name__ == "__main__":
             from perception.vlm_client import PerceptionClient
             scene.park_arm_for_capture()   # fold arm out of camera view before VLM snapshot
             frame_bytes, raw_frame, depth = scene.capture_frame()
+            scene.release_camera()   # no-op: shared Hydra prim cannot be safely removed
             try:
                 scene_metadata = PerceptionClient().analyze_frame(
                     frame_bytes, raw_frame=raw_frame, depth=depth, save_debug=True
@@ -227,6 +239,7 @@ if __name__ == "__main__":
             for obj in scene_metadata["objects"]:
                 world_xyz = scene.localize_by_color(obj["class_label"], raw_frame, depth)
                 if world_xyz is not None:
+                    world_xyz[2] = _OBJ_Z  # depth gives cube top surface; gripper needs center
                     print(f"[Main] {obj['id']} ({obj['class_label']}) localized -> {world_xyz}")
                     obj["coords"] = world_xyz.tolist()
                 else:
@@ -235,6 +248,29 @@ if __name__ == "__main__":
                     if obj_id in scene.objects:
                         obj["coords"] = scene.get_object_world_position(obj_id).tolist()
                         print(f"[Main] {obj['id']}: color seg failed, using Isaac Sim fallback")
+
+            # Degenerate-class guard: if VLM returned non-diverse labels (e.g., all ClassB),
+            # override class labels using independent per-class color segmentation.
+            unique_labels = {obj["class_label"] for obj in scene_metadata["objects"]}
+            if len(unique_labels) < len(scene_metadata["objects"]):
+                print(f"[Main] WARNING: VLM returned non-diverse labels {unique_labels}. "
+                      "Overriding with independent color detection.")
+                expected = [("ClassA", 1), ("ClassB", 2), ("ClassC", 3)]
+                override_objects = []
+                for class_label, box_id in expected:
+                    xyz = scene.localize_by_color(class_label, raw_frame, depth)
+                    if xyz is not None:
+                        override_objects.append({
+                            "id": f"obj_{box_id}",
+                            "class_label": class_label,
+                            "coords": xyz.tolist(),
+                        })
+                        print(f"[Main] Color-seg override: {class_label} -> {xyz}")
+                if len(override_objects) == 3:
+                    scene_metadata["objects"] = override_objects
+                    print("[Main] All 3 classes located by color. Proceeding with corrected plan.")
+                else:
+                    print(f"[Main] WARNING: Only {len(override_objects)}/3 classes found by color.")
         else:
             # Use known class labels + exact world positions from Isaac Sim
             scene_metadata = {
@@ -251,7 +287,21 @@ if __name__ == "__main__":
         # --- Step 2: Reason ---
         if USE_LLM:
             from reasoning.llm_client import ReasoningClient
-            sort_plan = ReasoningClient().generate_sort_plan(scene_metadata)
+            try:
+                sort_plan = ReasoningClient().generate_sort_plan(scene_metadata)
+            except Exception as e:
+                print(f"[Main] LLM reasoning failed: {e}")
+                print("[Main] Falling back to hardcoded class-to-box mapping.")
+                CLASS_TO_BOX = {"ClassA": 1, "ClassB": 2, "ClassC": 3}
+                sort_plan = [
+                    {
+                        "name": obj["id"],
+                        "class_label": obj["class_label"],
+                        "coords": obj["coords"],
+                        "target_box": CLASS_TO_BOX.get(obj["class_label"], i + 1),
+                    }
+                    for i, obj in enumerate(scene_metadata["objects"])
+                ]
         else:
             CLASS_TO_BOX = {"ClassA": 1, "ClassB": 2, "ClassC": 3}
             sort_plan = [
@@ -265,8 +315,18 @@ if __name__ == "__main__":
             ]
 
         # --- Step 3: Act ---
-        robot = FrankaRobot(scene)
+        # NOTE — VIDEO 2 DEMO MODE: demo_drop_second=True forces the gripper open
+        # mid-transit on the 2nd object so it physically falls, then the system
+        # re-localizes via camera and retries. This is intentional for the demo recording.
+        #
+        # TO RESTORE NORMAL PRODUCTION BEHAVIOUR: change to FrankaRobot(scene)
+        # (or pass demo_drop_second=False). The drop logic is in hardware_api.py
+        # FrankaRobot.place_in_box() and isaac_scene.py run_pick_and_place(force_drop=).
+        robot = FrankaRobot(scene, demo_drop_second=True)
         SortingStateMachine(robot=robot).run(sort_plan)
+
+        # Return arm to its upright home pose so the final scene looks clean.
+        scene.return_home()
 
         # Keep the scene open so the user can inspect the result.
         print("\n[Main] Sorting complete. Close the Isaac Sim window to exit.")

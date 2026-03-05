@@ -35,14 +35,16 @@ For each object determine:
     * y: -0.5 (bottom edge) to +0.5 (top edge)
     * z: 0.0  (placeholder — real depth will be supplied by the depth sensor)
 
+IMPORTANT: Study the image carefully and identify each object's actual color. Do NOT copy the example values below — use real positions from the image.
+
 CRITICAL: Respond ONLY with a valid JSON object. No prose, no markdown code fences.
 
-Required format:
+Required format (example values only — replace with actual observations):
 {
   "objects": [
-    {"id": "obj_1", "class_label": "ClassA", "coords": [-0.2,  0.1, 0.0]},
-    {"id": "obj_2", "class_label": "ClassB", "coords": [ 0.0,  0.0, 0.0]},
-    {"id": "obj_3", "class_label": "ClassC", "coords": [ 0.2, -0.1, 0.0]}
+    {"id": "obj_1", "class_label": "ClassA", "coords": [ 0.1,  0.3, 0.0]},
+    {"id": "obj_2", "class_label": "ClassB", "coords": [-0.2, -0.1, 0.0]},
+    {"id": "obj_3", "class_label": "ClassC", "coords": [ 0.4,  0.1, 0.0]}
   ]
 }"""
 

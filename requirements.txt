@@ -1,2 +1,94 @@
+# ============================================================
+# Autonomous Sorting System — Requirements
+# ============================================================
+#
+# HARDWARE
+# --------
+# GPU     : NVIDIA RTX 3060 or newer (8 GB VRAM minimum)
+#           12 GB VRAM recommended to run Isaac Sim + VLM simultaneously
+#           Tested on: NVIDIA RTX 4070 (12 GB)
+# RAM     : 16 GB minimum | 32 GB recommended
+# CPU     : Intel i7 / AMD Ryzen 7 or newer
+#           Tested on: Intel i9-13700KF
+# Storage : 60 GB free  (Isaac Sim ~40 GB, Ollama models ~5 GB, system ~15 GB)
+# OS      : Windows 10/11 x64  |  Ubuntu 20.04 / 22.04 LTS x64
+#           macOS is NOT supported (Isaac Sim unavailable on macOS)
+#
+# ============================================================
+# STEP 1 — NVIDIA GPU Driver
+# ============================================================
+# Required for Isaac Sim and CUDA acceleration.
+#
+# Windows:
+#   Download and install from https://www.nvidia.com/Download/index.aspx
+#   Minimum driver version: 535.x
+#
+# Linux (Ubuntu):
+#   sudo apt update
+#   sudo apt install nvidia-driver-535
+#   sudo reboot
+#   Verify: nvidia-smi
+#
+# ============================================================
+# STEP 2 — NVIDIA Isaac Sim 5.1.0 (Standalone)
+# ============================================================
+# Required for full pipeline (USE_ISAAC_SIM = True).
+# Download: https://developer.nvidia.com/isaac/sim
+# Select: Isaac Sim 5.1.0 — Standalone (no Omniverse Launcher needed)
+#
+# Windows default install path:
+#   D:\isaac-sim-standalone-5.1.0-windows-x86_64\
+#
+# Linux default install path:
+#   ~/isaacsim/
+#
+# Isaac Sim ships with its own bundled Python 3.11 — use it for all
+# Isaac Sim modes. Do NOT use system Python for Isaac Sim scripts.
+#
+#   Run (Windows): D:\isaac-sim-standalone-5.1.0-windows-x86_64\python.bat src/main.py
+#   Run (Linux)  : ~/isaacsim/python.sh src/main.py
+#
+# ============================================================
+# STEP 3 — Ollama (LLM / VLM inference server)
+# ============================================================
+# Required when USE_VLM=True or USE_LLM=True.
+#
+# Windows:
+#   winget install Ollama.Ollama
+#   — or download installer from https://ollama.com/download/windows
+#
+# Linux (Ubuntu):
+#   curl -fsSL https://ollama.com/install.sh | sh
+#
+# After install, pull the two required models (one-time download):
+#   ollama pull qwen2.5vl:3b       # Perception model  (~2.5 GB)
+#   ollama pull deepseek-r1:1.5b   # Reasoning model   (~1.1 GB)
+#
+# Start the server before running the pipeline (runs in background):
+#   ollama serve
+#
+# ============================================================
+# STEP 4 — System Python 3.10+ (webcam / mock modes only)
+# ============================================================
+# Required only when USE_ISAAC_SIM = False.
+# Isaac Sim modes use Isaac Sim's bundled Python — skip this step for those.
+#
+# Windows:
+#   Download from https://www.python.org/downloads/
+#   Tested on Python 3.11 x64
+#
+# Linux (Ubuntu):
+#   sudo apt install python3 python3-pip
+#
+# ============================================================
+# STEP 5 — Python packages (system Python, webcam/mock modes only)
+# ============================================================
+# Install with:  pip install -r requirements.txt
+#
+# Isaac Sim's bundled Python already includes numpy, opencv, and all
+# other dependencies — do NOT run pip install for Isaac Sim modes.
+# ============================================================
+
 ollama
 opencv-python
+numpy

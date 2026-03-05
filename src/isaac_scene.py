@@ -64,11 +64,20 @@ OBJECT_CLASS_LABELS = {
 # 7 arm joints + 2 gripper finger joints (open at 0.04 m).
 PARK_JOINTS = np.array([-1.5708, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785, 0.04, 0.04])
 
+# Standard Franka Panda upright home pose (matches USD asset default).
+HOME_JOINTS = np.array([0.0, -0.7854, 0.0, -2.3562, 0.0, 1.5708, 0.7854, 0.04, 0.04])
+
+# Random spawn bounds (within table area).
+# Per-bin exclusion radius (0.25m) and cube-to-cube min sep (0.20m) enforced at runtime.
+SPAWN_X_RANGE = (0.35, 0.60)
+SPAWN_Y_RANGE = (-0.22, 0.25)
+SPAWN_MIN_SEP = 0.25   # minimum center-to-center distance between cubes (m)
+
 # Bin drop-off positions (inside the open-top bin, slightly above floor of bin).
 # All bins sit on the table surface.
 BIN_POSITIONS = {
     1: np.array([0.45,  0.38, TABLE_H + 0.14]),   # Box 1 — ClassA (above bin walls for drop-in)
-    2: np.array([0.20,  0.38, TABLE_H + 0.14]),   # Box 2 — ClassB (above bin walls for drop-in)
+    2: np.array([0.73,  0.01, TABLE_H + 0.14]),   # Box 2 — ClassB (right edge — outside spawn zone)
     3: np.array([0.55, -0.36, TABLE_H + 0.14]),   # Box 3 — ClassC (above bin walls for drop-in)
 }
 
@@ -121,7 +130,9 @@ class IsaacScene:
         self._add_table()
         self._add_sorting_objects()
         self._add_bins()
+        self._add_bin_markers()
         self._add_camera_stand()
+        self._add_demo_camera()
         self._add_franka(assets_root_path)
         self._add_wrist_camera()
         self._init_world()
@@ -244,9 +255,9 @@ class IsaacScene:
 
     def _add_bins(self) -> None:
         bin_colors = {
-            1: np.array([200,  60,  60]),   # Box 1 — red bin
-            2: np.array([ 60,  60, 200]),   # Box 2 — blue bin
-            3: np.array([ 60, 180,  60]),   # Box 3 — green bin
+            1: np.array([240,  40,  40]),   # Box 1 — red bin  (matches ClassA cube)
+            2: np.array([ 40,  40, 240]),   # Box 2 — blue bin (matches ClassB cube)
+            3: np.array([ 40, 200,  40]),   # Box 3 — green bin (matches ClassC cube)
         }
         bin_centers = {
             1: (BIN_POSITIONS[1][0], BIN_POSITIONS[1][1]),
@@ -261,6 +272,28 @@ class IsaacScene:
                 base_z=TABLE_H,
                 color=bin_colors[box_id],
             )
+
+    def _add_bin_markers(self) -> None:
+        """
+        Place grey number markers inside each bin to indicate bin ID.
+        Grey (no saturation) ensures they are invisible to HSV color segmentation,
+        preventing false positives when localizing sorting cubes by color.
+        N small grey cubes in a row = bin N (1, 2, or 3).
+        """
+        marker_size = 0.022   # 2.2 cm per marker cube
+        spacing     = 0.030   # 3.0 cm center-to-center
+        grey = np.array([0.60, 0.60, 0.60])
+        for bin_id, (cx, cy, _) in [(k, BIN_POSITIONS[k]) for k in (1, 2, 3)]:
+            for i in range(bin_id):
+                offset_x = (i - (bin_id - 1) / 2.0) * spacing
+                self.world.scene.add(VisualCuboid(
+                    prim_path=f"/World/BinMarker_{bin_id}_{i}",
+                    name=f"bin_marker_{bin_id}_{i}",
+                    position=np.array([cx + offset_x, cy, TABLE_H + marker_size / 2 + 0.005]),
+                    scale=np.array([marker_size, marker_size, marker_size]),
+                    size=1.0,
+                    color=grey,
+                ))
 
     # ---- Camera stand ----
 
@@ -368,6 +401,33 @@ class IsaacScene:
             gripper=gripper,
         ))
         self.franka.gripper.set_default_state(self.franka.gripper.joint_opened_positions)
+
+    # ---- Demo camera (perspective view for video recording) ----
+
+    def _add_demo_camera(self) -> None:
+        """
+        Add a perspective camera at a good viewing angle for demo video recording.
+        Position: front-right, elevated, looking down toward the table center.
+        Set as active viewport via set_viewport_to_demo_camera() when not headless.
+        """
+        stage = get_current_stage()
+        cam_prim = UsdGeom.Camera.Define(stage, "/World/DemoCamera")
+        cam_prim.GetFocalLengthAttr().Set(18.0)
+        xf = UsdGeom.Xformable(cam_prim.GetPrim())
+        xf.ClearXformOpOrder()
+        xf.AddTranslateOp().Set(Gf.Vec3d(2.19319, 1.07493, 2.18947))
+        xf.AddRotateXYZOp().Set(Gf.Vec3f(49.15519, -0.0, 122.07789))
+
+    def set_viewport_to_demo_camera(self) -> None:
+        """Switch the active viewport to /World/DemoCamera."""
+        try:
+            import omni.kit.viewport.utility as vp_util
+            vp = vp_util.get_active_viewport()
+            if vp is not None:
+                vp.set_active_camera("/World/DemoCamera")
+                print("[Isaac Scene] Viewport switched to DemoCamera.")
+        except Exception as e:
+            print(f"[Isaac Scene] Could not switch viewport camera: {e}")
 
     # ---- Wrist camera ----
 
@@ -483,6 +543,48 @@ class IsaacScene:
             self.world.step(render=True)
         print("[Isaac Scene] Arm parked.")
 
+    def return_home(self, steps: int = 200) -> None:
+        """Smoothly move the arm back to its initial upright home pose after sorting.
+        Uses only apply_action() (no teleport) so physics drives the arm naturally."""
+        from isaacsim.core.utils.types import ArticulationAction
+        n_dof = self.franka.num_dof
+        home = HOME_JOINTS[:n_dof]
+        print("[Isaac Scene] Returning arm to home position...")
+        self.articulation_controller.apply_action(ArticulationAction(joint_positions=home))
+        for _ in range(steps):
+            self.world.step(render=True)
+        print("[Isaac Scene] Arm at home.")
+
+    def randomize_object_positions(self, rng_seed=None) -> None:
+        """
+        Teleport all sorting objects to random positions on the table.
+        Call AFTER setup() and BEFORE settle_physics() so physics settles
+        from the new positions.
+
+        Spawn zone: X=[0.28, 0.60], Y=[-0.22, 0.25] — within table area.
+        Objects are separated by at least SPAWN_MIN_SEP (0.20m) from each other
+        and at least 0.25m from every bin centre.
+        """
+        import random
+        rng = random.Random(rng_seed)
+        bin_centers = [(pos[0], pos[1]) for pos in BIN_POSITIONS.values()]
+        placed = []
+        for obj_id, obj in self.objects.items():
+            for _ in range(200):
+                x = rng.uniform(*SPAWN_X_RANGE)
+                y = rng.uniform(*SPAWN_Y_RANGE)
+                clear_of_cubes = all((x - px) ** 2 + (y - py) ** 2 >= SPAWN_MIN_SEP ** 2
+                                     for px, py in placed)
+                clear_of_bins  = all((x - bx) ** 2 + (y - by) ** 2 >= 0.25 ** 2
+                                     for bx, by in bin_centers)
+                if clear_of_cubes and clear_of_bins:
+                    placed.append((x, y))
+                    obj.set_world_pose(position=np.array([x, y, _OBJ_Z]))
+                    print(f"[Isaac Scene] {obj_id} → random ({x:.3f}, {y:.3f}, {_OBJ_Z:.3f})")
+                    break
+            else:
+                print(f"[Isaac Scene] WARNING: no valid random position found for {obj_id}")
+
     def _pixel_to_world(self, px: int, py: int, depth: np.ndarray) -> np.ndarray | None:
         """
         Back-project pixel (px, py) to world coordinates using the overhead
@@ -576,6 +678,19 @@ class IsaacScene:
               f"depth shape: {depth.shape}, range: [{depth.min():.2f}, {depth.max():.2f}] m.")
         return jpeg.tobytes(), bgr, depth
 
+    def release_camera(self) -> None:
+        """No-op — camera render product release is intentionally skipped.
+
+        camera.get_render_product_path() returns the shared Hydra prim
+        /Render/OmniverseKit/HydraTextures/Replicator.  Removing it via
+        stage.RemovePrim() breaks the render pipeline for all subsequent
+        world.step() calls (HydraEngine error code 6 on every frame).
+
+        VRAM contention is handled instead by the improved VLM prompt, which
+        makes qwen2.5vl:3b return correct labels even when running on CPU.
+        """
+        pass
+
     # ------------------------------------------------------------------
     # World-state helpers
     # ------------------------------------------------------------------
@@ -590,17 +705,69 @@ class IsaacScene:
     # Pick-and-place execution
     # ------------------------------------------------------------------
 
+    def is_object_near(self, position: np.ndarray, xy_tolerance: float = 0.12) -> bool:
+        """Return True if any sorting object's XY is within tolerance of position."""
+        for obj in self.objects.values():
+            obj_pos = obj.get_world_pose()[0]
+            if np.linalg.norm(obj_pos[:2] - position[:2]) < xy_tolerance:
+                return True
+        return False
+
+    def verify_cube_in_bin(self, class_label: str, bin_pos: np.ndarray) -> tuple:
+        """
+        Camera-based placement check after each sort.
+
+        Returns (confirmed: bool, fresh_xyz: np.ndarray | None).
+          confirmed=True  → cube in bin; fresh_xyz is None.
+          confirmed=False → cube still on table; fresh_xyz is its current world position
+                            so the caller can update pick coords for the next retry.
+
+        Logic:
+          - Color not visible overhead → cube inside bin walls (occluded) → True
+          - Color found within 20 cm XY of bin → landed in bin → True
+          - Color found > 20 cm from bin → still on table → False + fresh position
+        """
+        _, raw_frame, depth = self.capture_frame()
+        world_xyz = self.localize_by_color(class_label, raw_frame, depth)
+        if world_xyz is None:
+            print(f"[Robot] Camera check: {class_label} not visible overhead — inside bin walls ✓")
+            return True, None
+        xy_dist = np.linalg.norm(world_xyz[:2] - bin_pos[:2])
+        if xy_dist < 0.20:
+            print(f"[Robot] Camera check: {class_label} confirmed in bin ({xy_dist:.3f} m from center) ✓")
+            return True, None
+        world_xyz[2] = _OBJ_Z  # ensure z is cube-center height for next pick attempt
+        print(f"[Robot] Camera check: {class_label} still on table at "
+              f"({world_xyz[0]:.3f}, {world_xyz[1]:.3f}) — {xy_dist:.3f} m from bin ✗")
+        return False, world_xyz
+
     def run_pick_and_place(
         self,
         pick_pos: np.ndarray,
         place_pos: np.ndarray,
         max_steps: int = 2000,
+        settle_steps: int = 60,
+        force_drop: bool = False,
     ) -> bool:
         """
         Run one full pick-and-place cycle using PickPlaceController.
-        Returns True on success, False on timeout.
+        Returns True only if the controller completes AND a sorting object
+        reached the bin (XY within 12 cm of place_pos). Returns False on
+        timeout or if no object was found near the bin (missed grasp).
+        After is_done(), lets physics settle before the position check so
+        a cube that bounces momentarily into place_pos is not counted as success.
+
+        force_drop: if True, watches the finger joint each step and as soon as the
+        gripper physically closes around the cube (joint < 0.03 m), overrides both
+        finger joints to open (0.05 m) for all remaining steps while the arm joints
+        continue following the controller. The cube falls near the pick position.
+        Returns False so place_in_box skips verify_cube_in_bin and does a direct
+        table scan instead (no "not-visible = in bin walls" false positive).
         """
+        from isaacsim.core.utils.types import ArticulationAction
         self.controller.reset()
+        drop_waiting = force_drop    # True until gripper closes
+        gripper_override = False     # True once we start forcing gripper open
         for _ in range(max_steps):
             actions = self.controller.forward(
                 picking_position=pick_pos,
@@ -608,8 +775,21 @@ class IsaacScene:
                 current_joint_positions=self.franka.get_joint_positions(),
                 end_effector_offset=np.array([0, 0.005, 0]),
             )
-            self.articulation_controller.apply_action(actions)
+            # Detect gripper closure by physics state and start the drop.
+            if drop_waiting and self.franka.get_joint_positions()[7] < 0.03:
+                drop_waiting = False
+                gripper_override = True
+                print("[Isaac Scene] Demo drop: cube grasped — releasing gripper.")
+            if gripper_override and actions.joint_positions is not None and len(actions.joint_positions) >= 9:
+                open_pos = actions.joint_positions.copy()
+                open_pos[7] = 0.05
+                open_pos[8] = 0.05
+                self.articulation_controller.apply_action(ArticulationAction(joint_positions=open_pos))
+            else:
+                self.articulation_controller.apply_action(actions)
             self.world.step(render=True)
             if self.controller.is_done():
-                return True
+                for _ in range(settle_steps):
+                    self.world.step(render=True)
+                return self.is_object_near(place_pos)
         return False
