@@ -1,5 +1,12 @@
 # Autonomous Sorting System: Project Architecture
 
+## Demo Videos
+
+| Video | Download |
+| :--- | :--- |
+| Successful sorting — side view | [▶ Download](https://github.com/dennisgol1/Autonomous-Sorting-System/releases/download/v1.0-demo/Screen.Recording.2026-03-05.171146.mp4) |
+| Successful OBJECT_FELL and recovery — front view | [▶ Download](https://github.com/dennisgol1/Autonomous-Sorting-System/releases/download/v1.0-demo/Screen.Recording.2026-03-05.183737.mp4) |
+
 ## 1. System Overview
 The system utilizes a modular "Perceive-Reason-Act" pipeline to bridge high-level perception with low-level hardware execution.
 
